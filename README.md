@@ -1,6 +1,6 @@
 # Contrafold_GPU
 
-CONTRAfold on the GPU — **~370× faster than a single CPU core** and **~30× a full
+CONTRAfold on the GPU — **~430× faster than a single CPU core** and **~37× a full
 32-thread CPU** at folding 10,000 × 200 nt RNAs on an RTX 5090 (vs this package's
 own CPU reference; see [Benchmark.md](Benchmark.md)), reproducing the original
 CONTRAfold's output.
@@ -105,21 +105,22 @@ internally for efficiency.
 
 ## Benchmark
 
-Generate simulated sequences and measure throughput:
+Full results are in [Benchmark.md](Benchmark.md). Reproduce:
 
 ```bash
-# 10k random 200-nt sequences (deterministic; reproducible from the seed)
+# deterministic random sequences (reproducible from the seed)
 python benchmarks/generate_sequences.py -n 10000 -l 200 -o benchmarks/data/sim_10k_200nt.fa
 
-# logZ throughput + CPU/GPU correctness check (add --sample for sampling)
-python benchmarks/benchmark.py benchmarks/data/sim_10k_200nt.fa --chunk 4096
+# batch-size sweep, length scaling, constraint overhead, sampling, GPU-vs-CPU
+python benchmarks/benchmark.py benchmarks/data/sim_10k_200nt.fa --repeat 3
+# add --skip-compare for a fast GPU-only run (no slow single-core CPU pass)
 ```
 
-Observed on an RTX 5090 (10k × 200 nt, `--chunk 4096`): logZ ≈ **6,700 folds/s**
-(0.15 ms/fold), fold + 1 Boltzmann sample ≈ **3,000 folds/s**; CPU vs GPU logZ
-agrees to ~1e-4. GPU memory scales as `~3 × (L+2)² × 4 B` per sequence in a chunk
-(≈0.5 MB/seq at 200 nt, ≈3 MB/seq at 500 nt), so lower `--chunk` for longer
-sequences or smaller GPUs.
+Headline on an RTX 5090 (10k × 200 nt): logZ peaks at ~**9,800 folds/s** (~430× a
+single CPU core, ~37× the full 32-thread CPU); hard constraints add no GPU compute;
+Boltzmann sampling runs at ~6,000 structures/s (100 seqs × 100 samples). GPU memory
+scales as `~3 × (L+2)² × 4 B` per sequence in a batch (≈0.5 MB/seq at 200 nt,
+≈3 MB/seq at 500 nt), so use a smaller batch for longer sequences or smaller GPUs.
 
 ## Model
 
