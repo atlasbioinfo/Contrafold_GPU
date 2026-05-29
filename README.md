@@ -38,10 +38,44 @@ thousands of sequences at once.
 ## Install
 
 ```bash
-pip install numba numpy        # requires an NVIDIA GPU + CUDA toolkit (tested CUDA 12.8, sm_120)
+pip install gpu-contrafold
 ```
 
-The trained parameters (`data/contrafold.params.complementary`) are bundled.
+Requires an NVIDIA GPU + CUDA toolkit (tested CUDA 12.8, sm_120); `numpy` and `numba`
+are pulled in automatically. The trained parameters
+(`gpu_contrafold/data/contrafold.params.complementary`) are bundled. The CPU engine
+works without a GPU. Install from source with `pip install .`.
+
+## Command-line tool
+
+`pip install` exposes a `gpu-contrafold` command (also `python -m gpu_contrafold`):
+
+```bash
+gpu-contrafold fold GGGGAAAACCCC                 # one sequence -> logZ
+gpu-contrafold fold GGGGAAAACCCC --sample 10     # 10 Boltzmann structures (dot-bracket)
+gpu-contrafold fold seqs.jsonl  -o out.jsonl     # batch: JSONL in -> JSONL out
+gpu-contrafold fold seqs.fasta  -o out.jsonl --sample 100
+```
+
+The argument is a literal RNA sequence if it is not an existing file; otherwise it is
+read as **JSONL** (lines starting with `{`), **FASTA** (`>`), or one sequence per line.
+
+JSONL input — one object per line:
+
+```json
+{"id": "rna1", "seq": "GGGGAAAACCCC"}
+{"id": "rna2", "seq": "GGGGAAAACCCC", "constrain": [0,0,0,1,0,0,0,0,0,0,0,0]}
+```
+
+- `seq` (required); non-ACGU is treated as `N` (cannot pair).
+- `id` (optional), echoed to output; defaults to the 0-based index.
+- `constrain` (optional): per-base **0/1 hard-constraint mask**, length `== len(seq)`,
+  `1` forces that position unpaired (e.g. a DMS-reactive base). A list `[0,0,1,...]`
+  or string `"001..."`; omit for none.
+
+Output: a single literal sequence prints to stdout (logZ, or one structure per line
+with `--sample`); file input (or any `-o`) writes JSONL, input order preserved. Flags:
+`--sample N`, `--logz` (also emit logZ in sample mode), `--chunk`, `--seed`, `--threads`.
 
 ## Usage
 
@@ -73,39 +107,6 @@ from gpu_contrafold import cpu
 P = cpu.load()
 print(cpu.logZ("GGGGAAAACCCC", P))
 ```
-
-## Batch CLI (JSONL in / JSONL out)
-
-Fold a whole file of sequences in batches on the GPU:
-
-```bash
-python -m gpu_contrafold fold in.jsonl -o out.jsonl              # partition function (logZ)
-python -m gpu_contrafold fold in.jsonl -o out.jsonl --sample 100 # 100 Boltzmann samples each
-```
-
-**Input** — one JSON object per line:
-
-```json
-{"id": "rna1", "seq": "GGGGAAAACCCC"}
-{"id": "rna2", "seq": "GGGGAAAACCCC", "constrain": [0,0,0,1,0,0,0,0,0,0,0,0]}
-```
-
-- `seq` (required); non-ACGU is treated as `N` (cannot pair).
-- `id` (optional) is echoed to the output; defaults to the 0-based line index.
-- `constrain` (optional) is a per-base **0/1 hard-constraint mask**, length `== len(seq)`,
-  where `1` forces that position unpaired (e.g. a DMS-reactive base). Accepts a list
-  `[0,0,0,1,...]` or a string `"000100..."`; omit it (or `[]`) for no constraint.
-
-**Output** — one JSON object per line, input order preserved:
-
-```json
-{"id": "rna1", "logZ": 3.05661}                                  # default
-{"id": "rna1", "samples": ["((((....))))", "............"]}      # with --sample N
-```
-
-Add `--logz` to also include `logZ` in sample mode. Other flags: `--chunk` (sequences
-per GPU launch, default 4096), `--seed`, `--threads`. Sequences are grouped by length
-internally for efficiency.
 
 ## Benchmark
 

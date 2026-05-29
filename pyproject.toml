@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,11 +7,25 @@ name = "gpu-contrafold"
 version = "0.1.0"
 description = "GPU-accelerated CONTRAfold partition function + Boltzmann sampling with hard constraints"
 readme = "README.md"
-license = {text = "MIT"}
-authors = [{name = "HYU", email = "haopeng.yu@jic.ac.uk"}]
+license = "MIT"
+license-files = ["LICENSE", "NOTICE.md"]
+authors = [{name = "Haopeng Yu", email = "haopeng.yu@jic.ac.uk"}]
 requires-python = ">=3.8"
 dependencies = ["numpy>=1.22", "numba>=0.58"]
 keywords = ["RNA", "secondary-structure", "CONTRAfold", "GPU", "CUDA", "partition-function", "DMS-MaPseq"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA",
+]
+
+[project.urls]
+Homepage = "https://github.com/atlasbioinfo/Contrafold_GPU"
+Repository = "https://github.com/atlasbioinfo/Contrafold_GPU"
+Issues = "https://github.com/atlasbioinfo/Contrafold_GPU/issues"
 
 [project.scripts]
 gpu-contrafold = "gpu_contrafold.cli:main"
