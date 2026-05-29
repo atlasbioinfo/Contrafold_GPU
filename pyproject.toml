@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpu-contrafold"
+version = "0.1.0"
+description = "GPU-accelerated CONTRAfold partition function + Boltzmann sampling with hard constraints"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = ["numpy>=1.22", "numba>=0.58"]
+keywords = ["RNA", "secondary-structure", "CONTRAfold", "GPU", "CUDA", "partition-function", "DMS-MaPseq"]
+
+[tool.setuptools]
+packages = ["gpu_contrafold"]
+
+[tool.setuptools.package-data]
+gpu_contrafold = ["data/*"]

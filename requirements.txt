@@ -1,0 +1,5 @@
+numpy>=1.22
+numba>=0.58
+# Requires an NVIDIA GPU + matching CUDA toolkit (tested: CUDA 12.8, compute capability 12.0).
+# Optional, only for validating against the original CONTRAfold binary: build CONTRAfold
+# from its BSD-licensed source and set GPU_CONTRAFOLD_BIN.
