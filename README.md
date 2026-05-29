@@ -52,15 +52,16 @@ works without a GPU. Install from source with `pip install .`.
 `python -m gpu_contrafold`) — pass the sequence or file directly:
 
 ```bash
-gpu-contrafold GGGGAAAACCCC                 # one sequence -> one structure (dot-bracket)
-gpu-contrafold GGGGAAAACCCC --sample 10     # 10 Boltzmann structures
+gpu-contrafold GGGGAAAACCCC                 # one sequence -> MFE structure (dot-bracket)
+gpu-contrafold GGGGAAAACCCC --sample 10     # 10 Boltzmann samples
 gpu-contrafold GGGGAAAACCCC --logz          # partition function (logZ) instead
 gpu-contrafold seqs.jsonl  -o out.jsonl     # batch: JSONL in -> JSONL out
 gpu-contrafold seqs.fasta  -o out.jsonl --sample 100
 ```
 
-The default returns one Boltzmann-sampled structure (deterministic for a given
-`--seed`); this is a sampling/partition-function tool, not an MFE predictor.
+The default is the **maximum-probability (Viterbi/MAP) structure** — identical to
+`contrafold --viterbi` (verified: exact dot-bracket match over 40 random sequences).
+`--sample N` draws `N` Boltzmann samples; `--logz` gives the partition function.
 
 The argument is a literal RNA sequence if it is not an existing file; otherwise it is
 read as **JSONL** (lines starting with `{`), **FASTA** (`>`), or one sequence per line.
@@ -86,9 +87,12 @@ with `--sample N`, or `{"id","logZ"}` with `--logz` — input order preserved. F
 ## Usage
 
 ```python
-from gpu_contrafold import load, logZ_batch, sample_batch
+from gpu_contrafold import load, logZ_batch, sample_batch, mfe
 
 P = load()                                  # bundled CONTRAfold complementary params
+
+# Maximum-probability (Viterbi/MAP) structure, dot-bracket (matches contrafold --viterbi)
+db = mfe("GGGGAAAACCCC", P)                  # -> "((((....))))"
 
 # Log partition function (one per sequence), batched on GPU
 z = logZ_batch(["GGGGAAAACCCC", "GCGCGCAAAAGCGCGC"], P)

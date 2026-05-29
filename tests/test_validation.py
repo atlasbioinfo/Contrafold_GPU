@@ -75,6 +75,15 @@ def main():
     print(f"[4] forced-unpaired violations:  {viol}  {'PASS' if viol == 0 else 'FAIL'}")
     ok &= viol == 0
 
+    # 5. MFE (Viterbi) structure vs CONTRAfold --viterbi (optional)
+    try:
+        from gpu_contrafold import reference as ref
+        nmatch = sum(cpu.mfe(s, P) == ref.mfe_structure(s) for s in seqs[:20])
+        print(f"[5] MFE structure vs --viterbi:  {nmatch}/20 exact  {'PASS' if nmatch == 20 else 'FAIL'}")
+        ok &= nmatch == 20
+    except Exception as e:
+        print(f"[5] MFE structure check skipped: {type(e).__name__}")
+
     print("\n" + ("ALL PASS" if ok else "SOME FAILED"))
     sys.exit(0 if ok else 1)
 
