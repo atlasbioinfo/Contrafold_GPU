@@ -1,33 +1,39 @@
-"""Batch RNA folding CLI: JSONL in, JSONL out.
+"""Batch RNA folding CLI for gpu_contrafold.
 
-Input (one JSON object per line):
+Fold a single sequence, a JSONL file, or a FASTA file on the GPU.
+
+    gpu-contrafold fold GGGGAAAACCCC                  # one sequence -> logZ
+    gpu-contrafold fold GGGGAAAACCCC --sample 10      # 10 Boltzmann structures
+    gpu-contrafold fold seqs.jsonl -o out.jsonl       # batch (JSONL in/out)
+    gpu-contrafold fold seqs.fasta -o out.jsonl --sample 100
+
+The positional argument is a literal RNA sequence if it is not an existing file;
+otherwise it is read as JSONL (lines starting with `{`), FASTA (`>`), or a plain
+list of sequences (one per line).
+
+JSONL input (one object per line):
     {"id": "rna1", "seq": "GGGGAAAACCCC", "constrain": [0,0,0,1,0,0,0,0,0,0,0,0]}
   - seq        (required) RNA sequence; non-ACGU is treated as N (cannot pair).
-  - id         (optional) echoed to output; defaults to the 0-based line index.
+  - id         (optional) echoed to output; defaults to the 0-based index.
   - constrain  (optional) per-base 0/1 hard-constraint mask, length == len(seq),
-               1 = forced unpaired (e.g. DMS-reactive position). Accepts a list
-               [0,0,0,1,...] or a string "000100...". Omit or [] for none.
+               1 = forced unpaired. Accepts a list [0,0,1,...] or a string "001...".
 
-Output (one JSON object per line, input order preserved):
-  - default:          {"id": ..., "logZ": <float>}
-  - with --sample N:  {"id": ..., "samples": ["((..))", ...]}
-                      (add --logz to also include "logZ")
-
-Usage:
-    python -m gpu_contrafold fold in.jsonl -o out.jsonl
-    python -m gpu_contrafold fold in.jsonl -o out.jsonl --sample 100 --seed 0
+Output: a single literal sequence prints to stdout (logZ, or one structure per
+line with --sample); file input (or any -o) writes JSONL, input order preserved.
 """
 import argparse
 import json
+import os
 import sys
 
 import numpy as np
 
 from . import cpu, gpu
 
+_SEQ_CHARS = set("ACGUTN")
 
-def parse_records(path):
-    """Read JSONL -> list of (id, seq, constrain). Raises on malformed lines."""
+
+def _parse_jsonl(path):
     recs = []
     with open(path) as fh:
         for ln, line in enumerate(fh):
@@ -40,9 +46,54 @@ def parse_records(path):
                 raise SystemExit(f"line {ln}: invalid JSON ({e})")
             if "seq" not in obj or not obj["seq"]:
                 raise SystemExit(f"line {ln}: missing required field 'seq'")
-            recs.append((obj.get("id", ln), str(obj["seq"]).strip().upper(),
-                         obj.get("constrain")))
+            recs.append((obj.get("id", ln), str(obj["seq"]).strip().upper(), obj.get("constrain")))
     return recs
+
+
+def _parse_fasta(path):
+    recs, rid, cur = [], None, []
+    with open(path) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if line.startswith(">"):
+                if cur:
+                    recs.append((rid, "".join(cur).upper(), None)); cur = []
+                rid = line[1:].strip() or len(recs)
+            elif line.strip():
+                cur.append(line.strip())
+    if cur:
+        recs.append((rid, "".join(cur).upper(), None))
+    return recs
+
+
+def _parse_seq_lines(path):
+    recs = []
+    with open(path) as fh:
+        for i, line in enumerate(fh):
+            s = line.strip().upper()
+            if s:
+                recs.append((i, s, None))
+    return recs
+
+
+def load_records(src):
+    """Return (records, from_file). records: list of (id, seq, constrain)."""
+    if os.path.isfile(src):
+        head = ""
+        with open(src) as fh:
+            for line in fh:
+                if line.strip():
+                    head = line.strip()[0]
+                    break
+        if head == "{":
+            return _parse_jsonl(src), True
+        if head == ">":
+            return _parse_fasta(src), True
+        return _parse_seq_lines(src), True
+    seq = src.strip().upper()
+    if seq and all(c in _SEQ_CHARS for c in seq):
+        return [(0, seq, None)], False
+    raise SystemExit(f"'{src}' is not an existing file nor a valid RNA sequence (ACGUTN)")
 
 
 def build_mask(seq, constrain, where=""):
@@ -65,11 +116,11 @@ def build_mask(seq, constrain, where=""):
 
 
 def fold(records, P, sample_n=0, with_logz=False, chunk=4096, threads=128, seed=0):
-    """Batch-fold records on GPU, grouped by length, results mapped back to input order."""
+    """Batch-fold records on GPU, grouped by length, results mapped to input order."""
     n = len(records)
     seqs = [r[1] for r in records]
     masks = [build_mask(r[1], r[2], where=f"id={r[0]!r}: ") for r in records]
-    order = sorted(range(n), key=lambda k: len(seqs[k]))   # group similar lengths per chunk
+    order = sorted(range(n), key=lambda k: len(seqs[k]))
     logz = [None] * n
     samples = [None] * n
     for c0 in range(0, n, chunk):
@@ -77,8 +128,7 @@ def fold(records, P, sample_n=0, with_logz=False, chunk=4096, threads=128, seed=
         sub = [seqs[k] for k in idx]
         fl = [masks[k] for k in idx]
         if sample_n:
-            res = gpu.sample_batch(sub, P, sample_n, forced_list=fl, threads=threads, seed=seed + c0)
-            for k, r in zip(idx, res):
+            for k, r in zip(idx, gpu.sample_batch(sub, P, sample_n, forced_list=fl, threads=threads, seed=seed + c0)):
                 samples[k] = r
             if with_logz:
                 for k, z in zip(idx, gpu.logZ_batch(sub, P, forced_list=fl, threads=threads)):
@@ -93,29 +143,34 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="gpu-contrafold", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    pf = sub.add_parser("fold", help="batch-fold a JSONL file of RNA sequences",
+    pf = sub.add_parser("fold", help="fold a sequence, JSONL file, or FASTA file",
                         formatter_class=argparse.RawDescriptionHelpFormatter, description=__doc__)
-    pf.add_argument("input", help="input JSONL")
+    pf.add_argument("input", help="RNA sequence, or path to a JSONL/FASTA/sequence-per-line file")
     pf.add_argument("-o", "--output", default=None, help="output JSONL (default: stdout)")
     pf.add_argument("--sample", type=int, default=0, metavar="N",
                     help="draw N Boltzmann samples per sequence (default: 0 = logZ only)")
-    pf.add_argument("--logz", action="store_true",
-                    help="in --sample mode, also emit logZ (adds a second pass)")
+    pf.add_argument("--logz", action="store_true", help="in --sample mode, also emit logZ")
     pf.add_argument("--chunk", type=int, default=4096, help="sequences per GPU launch")
     pf.add_argument("--threads", type=int, default=128, help="GPU threads per block")
     pf.add_argument("--seed", type=int, default=0, help="RNG seed for sampling")
     args = parser.parse_args(argv)
 
-    records = parse_records(args.input)
+    records, from_file = load_records(args.input)
     if not records:
-        raise SystemExit("no records in input")
-    print(f"[gpu-contrafold] folding {len(records)} sequences "
-          f"({'sample ' + str(args.sample) if args.sample else 'logZ'}, chunk={args.chunk})",
-          file=sys.stderr)
+        raise SystemExit("no sequences in input")
 
     P = cpu.load()
     logz, samples = fold(records, P, sample_n=args.sample, with_logz=args.logz,
                          chunk=args.chunk, threads=args.threads, seed=args.seed)
+
+    # single literal sequence with no -o: human-readable stdout
+    if not from_file and not args.output:
+        if args.sample:
+            for db in samples[0]:
+                print(db)
+        else:
+            print(f"{logz[0]:.6f}")
+        return
 
     out = open(args.output, "w") if args.output else sys.stdout
     try:
@@ -131,8 +186,8 @@ def main(argv=None):
     finally:
         if args.output:
             out.close()
-    print(f"[gpu-contrafold] wrote {len(records)} records"
-          + (f" -> {args.output}" if args.output else ""), file=sys.stderr)
+    if args.output:
+        print(f"[gpu-contrafold] wrote {len(records)} records -> {args.output}", file=sys.stderr)
 
 
 if __name__ == "__main__":
