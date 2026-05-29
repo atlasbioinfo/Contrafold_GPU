@@ -2,10 +2,13 @@
 
 Fold a single sequence, a JSONL file, or a FASTA file on the GPU.
 
-    gpu-contrafold GGGGAAAACCCC                  # one sequence -> logZ
+    gpu-contrafold GGGGAAAACCCC                  # one sequence -> one structure (dot-bracket)
     gpu-contrafold GGGGAAAACCCC --sample 10      # 10 Boltzmann structures
+    gpu-contrafold GGGGAAAACCCC --logz           # partition function (logZ) instead
     gpu-contrafold seqs.jsonl -o out.jsonl       # batch (JSONL in/out)
-    gpu-contrafold seqs.fasta -o out.jsonl --sample 100
+
+By default one Boltzmann-sampled structure is returned (deterministic for a given
+--seed). Use --sample N for N structures, or --logz for the partition function.
 
 The positional argument is a literal RNA sequence if it is not an existing file;
 otherwise it is read as JSONL (lines starting with `{`), FASTA (`>`), or a plain
@@ -18,8 +21,9 @@ JSONL input (one object per line):
   - constrain  (optional) per-base 0/1 hard-constraint mask, length == len(seq),
                1 = forced unpaired. Accepts a list [0,0,1,...] or a string "001...".
 
-Output: a single literal sequence prints to stdout (logZ, or one structure per
-line with --sample); file input (or any -o) writes JSONL, input order preserved.
+Output: a single literal sequence prints structures to stdout (one per line);
+file input (or any -o) writes JSONL ({"id","structure"}, or {"id","samples":[...]}
+for --sample N, or {"id","logZ"} for --logz), input order preserved.
 """
 import argparse
 import json
@@ -148,8 +152,9 @@ def main(argv=None):
     parser.add_argument("input", help="RNA sequence, or path to a JSONL/FASTA/sequence-per-line file")
     parser.add_argument("-o", "--output", default=None, help="output JSONL (default: stdout)")
     parser.add_argument("--sample", type=int, default=0, metavar="N",
-                        help="draw N Boltzmann samples per sequence (default: 0 = logZ only)")
-    parser.add_argument("--logz", action="store_true", help="in --sample mode, also emit logZ")
+                        help="draw N structures per sequence (default: 1 structure)")
+    parser.add_argument("--logz", action="store_true",
+                        help="emit the partition function (logZ) instead of a structure")
     parser.add_argument("--chunk", type=int, default=4096, help="sequences per GPU launch")
     parser.add_argument("--threads", type=int, default=128, help="GPU threads per block")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for sampling")
@@ -159,13 +164,19 @@ def main(argv=None):
     if not records:
         raise SystemExit("no sequences in input")
 
+    # default: one sampled structure. --sample N: N structures. --logz (no --sample): logZ only.
+    logz_only = args.logz and not args.sample
+    n_samples = 0 if logz_only else (args.sample or 1)
+
     P = cpu.load()
-    logz, samples = fold(records, P, sample_n=args.sample, with_logz=args.logz,
+    logz, samples = fold(records, P, sample_n=n_samples, with_logz=args.logz,
                          chunk=args.chunk, threads=args.threads, seed=args.seed)
 
     # single literal sequence with no -o: human-readable stdout
     if not from_file and not args.output:
-        if args.sample:
+        if n_samples:
+            if args.logz:
+                print(f"# logZ = {logz[0]:.6f}")
             for db in samples[0]:
                 print(db)
         else:
@@ -176,12 +187,15 @@ def main(argv=None):
     try:
         for k, (rid, _seq, _con) in enumerate(records):
             rec = {"id": rid}
-            if args.sample:
+            if not n_samples:
+                rec["logZ"] = logz[k]
+            else:
                 if args.logz:
                     rec["logZ"] = logz[k]
-                rec["samples"] = samples[k]
-            else:
-                rec["logZ"] = logz[k]
+                if n_samples == 1:
+                    rec["structure"] = samples[k][0]
+                else:
+                    rec["samples"] = samples[k]
             out.write(json.dumps(rec) + "\n")
     finally:
         if args.output:
