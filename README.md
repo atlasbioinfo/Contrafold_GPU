@@ -13,9 +13,12 @@ running on the GPU via [Numba CUDA].
 
 ## Why
 
-CONTRAfold is a CPU-only C++ tool. Folding millions of short windows (e.g. for
-DMS-MaPseq / SHAPE structure-probing pipelines) is slow. This package runs the
-same model on the GPU, batching thousands of sequences at once.
+This started from a practical need: I had to fold large batches of RNA with
+[CONTRAfold](http://contra.stanford.edu/contrafold/), but it is a CPU-only C++
+tool and was simply too slow for that volume. So I reimplemented its model on the
+GPU. Folding millions of short windows (e.g. for DMS-MaPseq / SHAPE
+structure-probing pipelines) now runs the same model on the GPU, batching
+thousands of sequences at once.
 
 - **Accurate**: log-partition matches the CONTRAfold binary to ~1e-4 relative error
   (the residual is CONTRAfold's own `Fast_LogPlusEquals` lookup-table approximation;
@@ -109,10 +112,12 @@ python tests/test_validation.py
 
 ## Attribution & License
 
-This reimplements the model of **CONTRAfold** and ships its trained parameter file:
+This is a GPU rewrite of **CONTRAfold** (http://contra.stanford.edu/contrafold/)
+and ships its trained parameter file:
 
 > Do CB, Woods DA, Batzoglou S. *CONTRAfold: RNA secondary structure prediction
 > without physics-based models.* Bioinformatics. 2006;22(14):e90-8.
+> Project page: http://contra.stanford.edu/contrafold/
 
 This GPU reimplementation is released under the **MIT license** (see `LICENSE`).
 It incorporates the CONTRAfold model and bundles its trained parameter file, which
