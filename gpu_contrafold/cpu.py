@@ -1,0 +1,293 @@
+"""Faithful CPU port of CONTRAfold's partition function (complementary model).
+
+Replicates InferenceEngine.ipp ComputeInside (simple-FC variant), 1-based
+s[1..L], pair (i,j+1) convention, log_base=1.0 (natural log). Goal: logZ
+== CONTRAfold binary's --partition output.
+
+Scoring (all enabled terms for the complementary model):
+  base_pair, helix_stacking, terminal_mismatch, helix_closing, dangle L/R,
+  hairpin_length, bulge_length, internal_length, internal_symmetric,
+  internal_asymmetry, internal_explicit (<=4x4), internal_1x1, bulge_0x1.
+"""
+import os
+import numpy as np
+import math
+from numba import njit
+
+# Bundled trained parameters (CONTRAfold complementary model)
+DEFAULT_PARAMS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "data", "contrafold.params.complementary")
+
+NEG = -1e30
+HALF = -5e29
+B = {'A': 0, 'C': 1, 'G': 2, 'U': 3, 'T': 3}
+NBASE = 5   # 0..3 = ACGU, 4 = N/unknown (matches CONTRAfold char_mapping default)
+CANON = {(0, 3), (3, 0), (1, 2), (2, 1), (2, 3), (3, 2)}
+
+
+def code(c):
+    return B.get(c, 4)   # non-ACGU -> 4 (N), like CONTRAfold
+
+C_MAX_SINGLE = 30
+D_HAIRPIN = 30
+D_BULGE = 30
+D_INTERNAL = 30
+D_ISYM = 15
+D_IASYM = 28
+D_IEXP = 4
+
+
+def load(path=None):
+    if path is None:
+        path = DEFAULT_PARAMS
+    raw = {}
+    with open(path) as f:
+        for line in f:
+            p = line.split()
+            if len(p) == 2:
+                raw[p[0]] = float(p[1])
+
+    M = NBASE   # size-5 tables; index 4 (N) stays 0, matching CONTRAfold
+    bp = np.zeros((M, M))
+    for a in 'ACGU':
+        for b in 'ACGU':
+            v = raw.get(f"base_pair_{a}{b}", raw.get(f"base_pair_{b}{a}", 0.0))
+            bp[B[a], B[b]] = v; bp[B[b], B[a]] = v
+
+    stack = np.zeros((M, M, M, M))
+    for a in 'ACGU':
+        for b in 'ACGU':
+            for c in 'ACGU':
+                for d in 'ACGU':
+                    v = raw.get(f"helix_stacking_{a}{b}{c}{d}",
+                                raw.get(f"helix_stacking_{d}{c}{b}{a}", 0.0))
+                    stack[B[a], B[b], B[c], B[d]] = v
+
+    tm = np.zeros((M, M, M, M))
+    for a in 'ACGU':
+        for b in 'ACGU':
+            for c in 'ACGU':
+                for d in 'ACGU':
+                    tm[B[a], B[b], B[c], B[d]] = raw.get(f"terminal_mismatch_{a}{b}{c}{d}", 0.0)
+
+    hc = np.zeros((M, M))
+    for a in 'ACGU':
+        for b in 'ACGU':
+            hc[B[a], B[b]] = raw.get(f"helix_closing_{a}{b}", 0.0)
+
+    dl = np.zeros((M, M, M)); dr = np.zeros((M, M, M))
+    for a in 'ACGU':
+        for b in 'ACGU':
+            for c in 'ACGU':
+                dl[B[a], B[b], B[c]] = raw.get(f"dangle_left_{a}{b}{c}", 0.0)
+                dr[B[a], B[b], B[c]] = raw.get(f"dangle_right_{a}{b}{c}", 0.0)
+
+    def cum(prefix, dmax, start):
+        al = np.zeros(dmax + 1)
+        for k in range(start, dmax + 1):
+            al[k] = raw.get(f"{prefix}_at_least_{k}", 0.0)
+        return np.cumsum(al)
+
+    hp_cum = cum("hairpin_length", D_HAIRPIN, 0)
+    bulge_cum = cum("bulge_length", D_BULGE, 1)
+    il_cum = cum("internal_length", D_INTERNAL, 2)
+    isym_cum = cum("internal_symmetric_length", D_ISYM, 1)
+    iasym_cum = cum("internal_asymmetry", D_IASYM, 1)
+
+    iexp = np.zeros((D_IEXP + 1, D_IEXP + 1))
+    for l1 in range(1, D_IEXP + 1):
+        for l2 in range(1, D_IEXP + 1):
+            a, b = min(l1, l2), max(l1, l2)
+            iexp[l1, l2] = raw.get(f"internal_explicit_{a}_{b}", 0.0)
+
+    i11 = np.zeros((NBASE, NBASE))
+    for a in 'ACGU':
+        for b in 'ACGU':
+            v = raw.get(f"internal_1x1_nucleotides_{a}{b}",
+                        raw.get(f"internal_1x1_nucleotides_{b}{a}", 0.0))
+            i11[B[a], B[b]] = v; i11[B[b], B[a]] = v
+
+    b01 = np.zeros(NBASE)
+    for a in 'ACGU':
+        b01[B[a]] = raw.get(f"bulge_0x1_nucleotides_{a}", 0.0)
+
+    # cache_score_single[l1][l2]
+    cs = np.zeros((C_MAX_SINGLE + 1, C_MAX_SINGLE + 1))
+    for l1 in range(0, C_MAX_SINGLE + 1):
+        for l2 in range(0, C_MAX_SINGLE + 1 - l1):
+            if l1 == 0 and l2 == 0:
+                continue
+            if l1 == 0 or l2 == 0:
+                cs[l1, l2] = bulge_cum[min(D_BULGE, l1 + l2)]
+            else:
+                v = 0.0
+                if l1 <= D_IEXP and l2 <= D_IEXP:
+                    v += iexp[l1, l2]
+                v += il_cum[min(D_INTERNAL, l1 + l2)]
+                if l1 == l2:
+                    v += isym_cum[min(D_ISYM, l1)]
+                v += iasym_cum[min(D_IASYM, abs(l1 - l2))]
+                cs[l1, l2] = v
+
+    return dict(bp=bp, stack=stack, tm=tm, hc=hc, dl=dl, dr=dr, hp_cum=hp_cum,
+                cs=cs, i11=i11, b01=b01,
+                mb=raw["multi_base"], mu=raw["multi_unpaired"], mp=raw["multi_paired"],
+                eu=raw["external_unpaired"], ep=raw["external_paired"])
+
+
+def encode(seq):
+    # 1-based: s[1..L]; non-ACGU -> 4 (N). Sentinels s[0],s[L+1]=4 (never pair).
+    L = len(seq)
+    s = np.full(L + 2, 4, dtype=np.int64)
+    for i, c in enumerate(seq.upper()):
+        s[i + 1] = code(c)
+    return s, L
+
+
+def canon_mat():
+    m = np.zeros((NBASE, NBASE), dtype=np.int64)   # row/col 4 (N) stay 0 -> N never pairs
+    for (a, b) in CANON:
+        m[a, b] = 1
+    return m
+
+
+@njit(cache=True, inline='always')
+def lse(a, b):
+    if a < HALF:
+        return b
+    if b < HALF:
+        return a
+    if a > b:
+        return a + math.log1p(math.exp(b - a))
+    return b + math.log1p(math.exp(a - b))
+
+
+@njit(cache=True)
+def inside(s, L, forced, bp, stack, tm, hc, dl, dr, hp_cum, cs, i11, b01,
+           mb, mu, mp, eu, ep, canon):
+    # allow_paired(a,b): canonical & not forced (1-based a,b in 1..L)
+    NEGv = NEG
+    FC = np.full((L + 2, L + 2), NEGv)
+    FM = np.full((L + 2, L + 2), NEGv)
+    FM1 = np.full((L + 2, L + 2), NEGv)
+    F5 = np.full(L + 2, NEGv)
+
+    # helper inline score funcs
+    # jA(i,j), jB(i,j) use s[i],s[j+1],s[i+1],s[j]
+    for i in range(L, -1, -1):
+        for j in range(i, L + 1):
+            # ---- FM2[i][j] = LSE_{i<k<j} FM1[i][k] + FM[k][j] ----
+            FM2 = NEGv
+            for k in range(i + 1, j):
+                if FM1[i, k] > HALF and FM[k, j] > HALF:
+                    FM2 = lse(FM2, FM1[i, k] + FM[k, j])
+
+            # ---- FC[i][j] : pair (i, j+1) ----
+            if 0 < i and j < L and canon[s[i], s[j + 1]] == 1 and forced[i] == 0 and forced[j + 1] == 0:
+                sum_i = NEGv
+                # hairpin: loop length d = j - i (>= C_MIN=0)
+                if j - i >= 0:
+                    # jB(i,j) = hc[s[i]][s[j+1]] + tm[s[i]][s[j+1]][s[i+1]][s[j]]
+                    jB = hc[s[i], s[j + 1]] + tm[s[i], s[j + 1], s[i + 1], s[j]]
+                    sum_i = lse(sum_i, jB + hp_cum[j - i if j - i <= D_HAIRPIN else D_HAIRPIN])
+                # single-branch loops (stack/bulge/internal): inner pair (p+1, q)
+                pmax = i + C_MAX_SINGLE
+                if pmax > j:
+                    pmax = j
+                for p in range(i, pmax + 1):
+                    l1 = p - i
+                    qmin = p + 2
+                    alt = p - i + j - C_MAX_SINGLE
+                    if alt > qmin:
+                        qmin = alt
+                    for q in range(j, qmin - 1, -1):
+                        l2 = j - q
+                        # inner pair (p+1, q)
+                        if canon[s[p + 1], s[q]] == 1 and forced[p + 1] == 0 and forced[q] == 0 and FC[p + 1, q - 1] > HALF:
+                            if p == i and q == j:
+                                e = bp[s[i + 1], s[j]] + stack[s[i], s[j + 1], s[i + 1], s[j]]
+                            else:
+                                # ScoreSingle
+                                jB1 = hc[s[i], s[j + 1]] + tm[s[i], s[j + 1], s[i + 1], s[j]]
+                                jB2 = hc[s[q], s[p + 1]] + tm[s[q], s[p + 1], s[q + 1], s[p]]
+                                snuc = 0.0
+                                if l1 == 0 and l2 == 1:
+                                    snuc = b01[s[j]]
+                                elif l1 == 1 and l2 == 0:
+                                    snuc = b01[s[i + 1]]
+                                elif l1 == 1 and l2 == 1:
+                                    snuc = i11[s[i + 1], s[j]]
+                                e = cs[l1, l2] + bp[s[p + 1], s[q]] + jB1 + jB2 + snuc
+                            sum_i = lse(sum_i, e + FC[p + 1, q - 1])
+                # multibranch
+                if FM2 > HALF:
+                    jA = hc[s[i], s[j + 1]]
+                    if i < L:
+                        jA += dl[s[i], s[j + 1], s[i + 1]]
+                    if j > 0:
+                        jA += dr[s[i], s[j + 1], s[j]]
+                    sum_i = lse(sum_i, FM2 + jA + mp + mb)
+                FC[i, j] = sum_i
+
+            # ---- FM1[i][j] ----
+            if 0 < i and i + 2 <= j and j < L:
+                sum_i = NEGv
+                # FC[i+1][j-1] + jA(j,i) + mp + bp(i+1,j)   [pair (i+1,j)]
+                if canon[s[i + 1], s[j]] == 1 and forced[i + 1] == 0 and forced[j] == 0 and FC[i + 1, j - 1] > HALF:
+                    jAji = hc[s[j], s[i + 1]]
+                    if j < L:
+                        jAji += dl[s[j], s[i + 1], s[j + 1]]
+                    if i > 0:
+                        jAji += dr[s[j], s[i + 1], s[i]]
+                    sum_i = lse(sum_i, FC[i + 1, j - 1] + jAji + mp + bp[s[i + 1], s[j]])
+                # FM1[i+1][j] + mu
+                if FM1[i + 1, j] > HALF:
+                    sum_i = lse(sum_i, FM1[i + 1, j] + mu)
+                FM1[i, j] = sum_i
+
+            # ---- FM[i][j] ----
+            if 0 < i and i + 2 <= j and j < L:
+                sum_i = NEGv
+                if FM2 > HALF:
+                    sum_i = lse(sum_i, FM2)
+                if FM[i, j - 1] > HALF:
+                    sum_i = lse(sum_i, FM[i, j - 1] + mu)
+                if FM1[i, j] > HALF:
+                    sum_i = lse(sum_i, FM1[i, j])
+                FM[i, j] = sum_i
+
+    # ---- F5 exterior ----
+    F5[0] = 0.0
+    for j in range(1, L + 1):
+        sum_i = F5[j - 1] + eu       # j unpaired
+        for k in range(0, j):
+            # branch pair (k+1, j)
+            if canon[s[k + 1], s[j]] == 1 and forced[k + 1] == 0 and forced[j] == 0 and FC[k + 1, j - 1] > HALF:
+                if F5[k] > HALF:
+                    # jA(j,k) = hc[s[j]][s[k+1]] + (j<L? dl[s[j]][s[k+1]][s[j+1]]) + (k>0? dr[s[j]][s[k+1]][s[k]])
+                    jA = hc[s[j], s[k + 1]]
+                    if j < L:
+                        jA += dl[s[j], s[k + 1], s[j + 1]]
+                    if k > 0:
+                        jA += dr[s[j], s[k + 1], s[k]]
+                    sum_i = lse(sum_i, F5[k] + FC[k + 1, j - 1] + ep + bp[s[k + 1], s[j]] + jA)
+        F5[j] = sum_i
+    return F5[L]
+
+
+_PARAMS = None
+_CANON = canon_mat()
+
+
+def logZ(seq, P):
+    s, L = encode(seq)
+    forced = np.zeros(L + 2, dtype=np.int64)
+    return inside(s, L, forced, P["bp"], P["stack"], P["tm"], P["hc"], P["dl"], P["dr"],
+                  P["hp_cum"], P["cs"], P["i11"], P["b01"],
+                  P["mb"], P["mu"], P["mp"], P["eu"], P["ep"], _CANON)
+
+
+if __name__ == "__main__":
+    P = load()
+    for s in ["GGGGAAAACCCC", "GCGCGCAAAAGCGCGCAAAAGCGC"]:
+        print(f"{s}  logZ={logZ(s, P):.5f}")
