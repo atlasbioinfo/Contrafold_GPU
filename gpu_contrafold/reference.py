@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import numpy as np
 
-_PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PKG = os.path.dirname(os.path.abspath(__file__))
 CONTRAFOLD = os.environ.get("GPU_CONTRAFOLD_BIN", "contrafold")
 PARAMS = os.path.join(_PKG, "data", "contrafold.params.complementary")
 
