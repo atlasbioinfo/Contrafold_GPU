@@ -200,8 +200,6 @@ faithful re-implementation); full credit for the method belongs to them:
 > without physics-based models.* Bioinformatics. 2006;22(14):e90–e98.
 > doi:[10.1093/bioinformatics/btl246](https://doi.org/10.1093/bioinformatics/btl246)
 
-Please **cite the CONTRAfold paper** if you use this package in published work.
-
 ## License
 
 This GPU reimplementation is released under the **MIT license** (see `LICENSE`).
