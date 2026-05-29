@@ -65,6 +65,24 @@ P = cpu.load()
 print(cpu.logZ("GGGGAAAACCCC", P))
 ```
 
+## Benchmark
+
+Generate simulated sequences and measure throughput:
+
+```bash
+# 10k random 200-nt sequences (deterministic; reproducible from the seed)
+python benchmarks/generate_sequences.py -n 10000 -l 200 -o benchmarks/data/sim_10k_200nt.fa
+
+# logZ throughput + CPU/GPU correctness check (add --sample for sampling)
+python benchmarks/benchmark.py benchmarks/data/sim_10k_200nt.fa --chunk 4096
+```
+
+Observed on an RTX 5090 (10k × 200 nt, `--chunk 4096`): logZ ≈ **6,700 folds/s**
+(0.15 ms/fold), fold + 1 Boltzmann sample ≈ **3,000 folds/s**; CPU vs GPU logZ
+agrees to ~1e-4. GPU memory scales as `~3 × (L+2)² × 4 B` per sequence in a chunk
+(≈0.5 MB/seq at 200 nt, ≈3 MB/seq at 500 nt), so lower `--chunk` for longer
+sequences or smaller GPUs.
+
 ## Model
 
 Complementary CONTRAfold model, all scoring terms enabled: `base_pair`,
@@ -96,8 +114,9 @@ This reimplements the model of **CONTRAfold** and ships its trained parameter fi
 > Do CB, Woods DA, Batzoglou S. *CONTRAfold: RNA secondary structure prediction
 > without physics-based models.* Bioinformatics. 2006;22(14):e90-8.
 
-CONTRAfold is distributed under the BSD license. The bundled parameter file and the
-scoring/recurrence logic derive from the CONTRAfold source; please retain this
-attribution and cite the paper. This GPU reimplementation is provided for research use.
+This GPU reimplementation is released under the **MIT license** (see `LICENSE`).
+It incorporates the CONTRAfold model and bundles its trained parameter file, which
+derive from the **BSD-licensed** CONTRAfold source (see `NOTICE.md`); those components
+remain under their original terms. Please retain that attribution and cite the paper.
 
 [Numba CUDA]: https://numba.readthedocs.io/en/stable/cuda/index.html
