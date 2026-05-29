@@ -21,13 +21,35 @@ DH = 30    # D_MAX_HAIRPIN
 
 @cuda.jit(device=True, inline=True)
 def lse(a, b):
-    if a < HALF:
-        return b
+    # CONTRAfold Fast_LogPlusEquals (RealT=float): float polynomial Fast_LogExpPlusOne
+    # over [0, 11.8624794162) and hard truncation above it. Reproduces the binary.
+    if a < b:
+        t = a; a = b; b = t          # a >= b
     if b < HALF:
         return a
-    if a > b:
-        return a + math.log1p(math.exp(b - a))
-    return b + math.log1p(math.exp(a - b))
+    d = a - b
+    if d >= float32(11.8624794162):
+        return a
+    if d < float32(3.3792499610):
+        if d < float32(1.6320158198):
+            if d < float32(0.6615367791):
+                r = ((float32(-0.0065591595) * d + float32(0.1276442762)) * d + float32(0.4996554598)) * d + float32(0.6931542306)
+            else:
+                r = ((float32(-0.0155157557) * d + float32(0.1446775699)) * d + float32(0.4882939746)) * d + float32(0.6958092989)
+        elif d < float32(2.4912588184):
+            r = ((float32(-0.0128909247) * d + float32(0.1301028251)) * d + float32(0.5150398748)) * d + float32(0.6795585882)
+        else:
+            r = ((float32(-0.0072142647) * d + float32(0.0877540853)) * d + float32(0.6208708362)) * d + float32(0.5909675829)
+    elif d < float32(5.7890710412):
+        if d < float32(4.4261691294):
+            r = ((float32(-0.0031455354) * d + float32(0.0467229449)) * d + float32(0.7592532310)) * d + float32(0.4348794399)
+        else:
+            r = ((float32(-0.0010110698) * d + float32(0.0185943421)) * d + float32(0.8831730747)) * d + float32(0.2523695427)
+    elif d < float32(7.8162726752):
+        r = ((float32(-0.0001962780) * d + float32(0.0046084408)) * d + float32(0.9634431978)) * d + float32(0.0983148903)
+    else:
+        r = ((float32(-0.0000113994) * d + float32(0.0003734731)) * d + float32(0.9959107193)) * d + float32(0.0149855051)
+    return b + r
 
 
 @cuda.jit(cache=True)
