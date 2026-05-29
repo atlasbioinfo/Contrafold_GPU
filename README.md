@@ -52,16 +52,22 @@ works without a GPU. Install from source with `pip install .`.
 `python -m gpu_contrafold`) — pass the sequence or file directly:
 
 ```bash
-gpu-contrafold GGGGAAAACCCC                 # one sequence -> MFE structure (dot-bracket)
+gpu-contrafold GGGGAAAACCCC                 # one sequence -> MEA structure (dot-bracket)
+gpu-contrafold GGGGAAAACCCC --gamma 4       # MEA with a custom tradeoff (default 6)
+gpu-contrafold GGGGAAAACCCC --viterbi       # max-probability (Viterbi/MAP) structure
 gpu-contrafold GGGGAAAACCCC --sample 10     # 10 Boltzmann samples
 gpu-contrafold GGGGAAAACCCC --logz          # partition function (logZ) instead
 gpu-contrafold seqs.jsonl  -o out.jsonl     # batch: JSONL in -> JSONL out
 gpu-contrafold seqs.fasta  -o out.jsonl --sample 100
 ```
 
-The default is the **maximum-probability (Viterbi/MAP) structure** — identical to
-`contrafold --viterbi` (verified: exact dot-bracket match over 40 random sequences).
-`--sample N` draws `N` Boltzmann samples; `--logz` gives the partition function.
+The default is the **maximum-expected-accuracy (MEA) structure** via posterior
+decoding — exactly what `contrafold predict` returns by default (verified: exact
+dot-bracket match over 400 random sequences up to 250 nt, and across `--gamma`
+0.5–16). `--gamma G` sets the sensitivity/specificity tradeoff (default 6, as in
+CONTRAfold). `--viterbi` gives the **maximum-probability (Viterbi/MAP) structure**
+instead — identical to `contrafold --viterbi`. `--sample N` draws `N` Boltzmann
+samples; `--logz` gives the partition function.
 
 The argument is a literal RNA sequence if it is not an existing file; otherwise it is
 read as **JSONL** (lines starting with `{`), **FASTA** (`>`), or one sequence per line.
@@ -82,17 +88,23 @@ JSONL input — one object per line:
 Output: a single literal sequence prints structures to stdout (one per line); file
 input (or any `-o`) writes JSONL — `{"id","structure"}` by default, `{"id","samples":[...]}`
 with `--sample N`, or `{"id","logZ"}` with `--logz` — input order preserved. Flags:
-`--sample N`, `--logz`, `--chunk`, `--seed`, `--threads`.
+`--gamma G`, `--viterbi`, `--sample N`, `--logz`, `--chunk`, `--seed`, `--threads`.
 
 ## Usage
 
 ```python
-from gpu_contrafold import load, logZ_batch, sample_batch, mfe
+from gpu_contrafold import load, logZ_batch, sample_batch, mfe, mea, bpp
 
 P = load()                                  # bundled CONTRAfold complementary params
 
 # Maximum-probability (Viterbi/MAP) structure, dot-bracket (matches contrafold --viterbi)
 db = mfe("GGGGAAAACCCC", P)                  # -> "((((....))))"
+
+# Maximum-expected-accuracy structure (matches contrafold's default `predict`)
+db = mea("GGGGAAAACCCC", P, gamma=6)         # -> "((((....))))"
+
+# Exact base-pair probability matrix (inside+outside; matches contrafold --posteriors)
+prob = bpp("GGGGAAAACCCC", P)                # n x n upper-triangular numpy array
 
 # Log partition function (one per sequence), batched on GPU
 z = logZ_batch(["GGGGAAAACCCC", "GCGCGCAAAAGCGCGC"], P)
@@ -153,10 +165,16 @@ and carries zero scores — exactly as the CONTRAfold binary handles them.
 `tests/test_validation.py` checks:
 1. CPU (exact, double) vs GPU (CONTRAfold float arithmetic) `logZ` agree to ~1e-3, and
 2. GPU `logZ` matches the original CONTRAfold binary (`--partition`) to ~5e-4 if available, and
-3. GPU sample base-pair frequencies == CONTRAfold posteriors (`--posteriors`).
+3. GPU sample base-pair frequencies == CONTRAfold posteriors (`--posteriors`), and
+4. MFE structure == `contrafold --viterbi` (exact dot-bracket), and
+5. MEA structure == `contrafold predict` default decoding (exact dot-bracket, all gammas), and
+6. exact `bpp` matrix == `contrafold --posteriors`.
 
 Verified against CONTRAfold 2.02 (max |Δ logZ| 5e-4 over 20 random sequences;
-sample BPP within 0.006 of `--posteriors`).
+sample BPP within 0.006 of `--posteriors`; **MEA dot-bracket exact over 400 random
+sequences up to 250 nt and across `--gamma` 0.5–16**). The MEA/posterior path is
+computed in CONTRAfold's `RealT=float` arithmetic (`Fast_LogPlusEquals`/`Fast_Exp`
+polynomials) so the discrete decode reproduces the binary exactly.
 
 To validate against the original binary, build CONTRAfold and point to it:
 ```bash

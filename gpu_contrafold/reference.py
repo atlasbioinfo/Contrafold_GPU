@@ -78,6 +78,28 @@ def mfe_structure(seq, params=PARAMS):
             os.remove(out)
 
 
+def mea_structure(seq, gamma=None, params=PARAMS):
+    """Maximum-expected-accuracy (posterior decoding) dot-bracket — CONTRAfold's
+    default `predict` (no --viterbi). `gamma` sets the tradeoff (binary default 6)."""
+    with tempfile.NamedTemporaryFile("w", suffix=".fasta", delete=False) as f:
+        f.write(f">s\n{seq}\n")
+        fa = f.name
+    out = fa + ".parens"
+    try:
+        cmd = [CONTRAFOLD, "predict"]
+        if gamma is not None:
+            cmd += ["--gamma", str(gamma)]
+        cmd += ["--parens", out, "--params", params, fa]
+        subprocess.run(cmd, capture_output=True, text=True)
+        with open(out) as fh:
+            lines = [l.rstrip("\n") for l in fh]
+        return lines[-1].strip()
+    finally:
+        os.remove(fa)
+        if os.path.exists(out):
+            os.remove(out)
+
+
 def bpp(seq, cutoff=1e-5, params=PARAMS):
     """Base-pair probability matrix (n x n, upper triangle) from --posteriors."""
     n = len(seq)

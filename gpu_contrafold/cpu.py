@@ -519,7 +519,429 @@ def mfe(seq, P, forced=None):
     return "".join(ch)
 
 
+F32 = np.float32
+NEG32 = F32(-1e30)
+HALF32 = F32(-5e29)
+
+
+@njit(cache=True, inline='always')
+def lse32(a, b):
+    """log(exp(a)+exp(b)) in float32 — CONTRAfold Fast_LogPlusEquals (RealT=float):
+    8-segment Fast_LogExpPlusOne polynomial + hard truncation at 11.8624794162."""
+    if a < b:
+        t = a; a = b; b = t
+    if b < HALF32:
+        return a
+    d = a - b
+    if d >= F32(11.8624794162):
+        return a
+    if d < F32(3.3792499610):
+        if d < F32(1.6320158198):
+            if d < F32(0.6615367791):
+                r = ((F32(-0.0065591595) * d + F32(0.1276442762)) * d + F32(0.4996554598)) * d + F32(0.6931542306)
+            else:
+                r = ((F32(-0.0155157557) * d + F32(0.1446775699)) * d + F32(0.4882939746)) * d + F32(0.6958092989)
+        elif d < F32(2.4912588184):
+            r = ((F32(-0.0128909247) * d + F32(0.1301028251)) * d + F32(0.5150398748)) * d + F32(0.6795585882)
+        else:
+            r = ((F32(-0.0072142647) * d + F32(0.0877540853)) * d + F32(0.6208708362)) * d + F32(0.5909675829)
+    elif d < F32(5.7890710412):
+        if d < F32(4.4261691294):
+            r = ((F32(-0.0031455354) * d + F32(0.0467229449)) * d + F32(0.7592532310)) * d + F32(0.4348794399)
+        else:
+            r = ((F32(-0.0010110698) * d + F32(0.0185943421)) * d + F32(0.8831730747)) * d + F32(0.2523695427)
+    elif d < F32(7.8162726752):
+        r = ((F32(-0.0001962780) * d + F32(0.0046084408)) * d + F32(0.9634431978)) * d + F32(0.0983148903)
+    else:
+        r = ((F32(-0.0000113994) * d + F32(0.0003734731)) * d + F32(0.9959107193)) * d + F32(0.0149855051)
+    return b + r
+
+
+@njit(cache=True, inline='always')
+def fexp32(x):
+    """exp(x) in float32 — CONTRAfold Fast_Exp (RealT=float): 6-segment polynomial
+    on (-9.91152, 0), 0 below, expf above."""
+    if x < F32(-2.4915033807):
+        if x < F32(-5.8622823336):
+            if x < F32(-9.91152):
+                return F32(0.0)
+            return ((F32(0.0000803850) * x + F32(0.0021627428)) * x + F32(0.0194708555)) * x + F32(0.0588080014)
+        if x < F32(-3.8396630909):
+            return ((F32(0.0013889414) * x + F32(0.0244676474)) * x + F32(0.1471290604)) * x + F32(0.3042757740)
+        return ((F32(0.0072335607) * x + F32(0.0906002677)) * x + F32(0.3983111356)) * x + F32(0.6245959221)
+    if x < F32(-0.6725053211):
+        if x < F32(-1.4805375919):
+            return ((F32(0.0232410351) * x + F32(0.2085645908)) * x + F32(0.6906367911)) * x + F32(0.8682322329)
+        return ((F32(0.0573782771) * x + F32(0.3580258429)) * x + F32(0.9121133217)) * x + F32(0.9793091728)
+    if x < F32(0.0):
+        return ((F32(0.1199175927) * x + F32(0.4815668234)) * x + F32(0.9975991939)) * x + F32(0.9999505077)
+    if x > F32(46.052):
+        return F32(1e20)
+    return F32(math.exp(x))
+
+
+@njit(cache=True)
+def posterior(s, L, forced, bp, stack, tm, hc, dl, dr, hp_cum, cs, i11, b01,
+              mb, mu, mp, eu, ep, canon):
+    """Base-pair posterior probability matrix via inside + outside.
+
+    Faithful port of CONTRAfold ComputeInside/ComputeOutside/ComputePosterior
+    (complementary model: PARAMS_HELIX_LENGTH=0, FAST_SINGLE_BRANCH_LOOPS=1).
+    Returns POST[i, j] (1-based, i<j) = P(i pairs j). All arithmetic is in
+    float32 with CONTRAfold's exact Fast_LogPlusEquals/Fast_Exp polynomials so
+    the result reproduces the RealT=float binary."""
+    NEGv = NEG32
+    ZERO = F32(0.0)
+    # ---------- inside ----------
+    FC = np.full((L + 2, L + 2), NEGv)
+    FM = np.full((L + 2, L + 2), NEGv)
+    FM1 = np.full((L + 2, L + 2), NEGv)
+    F5 = np.full(L + 2, NEGv)
+    for i in range(L, -1, -1):
+        for j in range(i, L + 1):
+            FM2 = NEGv
+            for k in range(i + 1, j):
+                if FM1[i, k] > HALF32 and FM[k, j] > HALF32:
+                    FM2 = lse32(FM2, FM1[i, k] + FM[k, j])
+            if 0 < i and j < L and canon[s[i], s[j + 1]] == 1 and forced[i] == 0 and forced[j + 1] == 0:
+                sum_i = NEGv
+                if j - i >= 0:
+                    jB = hc[s[i], s[j + 1]] + tm[s[i], s[j + 1], s[i + 1], s[j]]
+                    sum_i = lse32(sum_i, jB + hp_cum[j - i if j - i <= D_HAIRPIN else D_HAIRPIN])
+                pmax = i + C_MAX_SINGLE
+                if pmax > j:
+                    pmax = j
+                for p in range(i, pmax + 1):
+                    l1 = p - i
+                    qmin = p + 2
+                    alt = p - i + j - C_MAX_SINGLE
+                    if alt > qmin:
+                        qmin = alt
+                    for q in range(j, qmin - 1, -1):
+                        l2 = j - q
+                        if canon[s[p + 1], s[q]] == 1 and forced[p + 1] == 0 and forced[q] == 0 and FC[p + 1, q - 1] > HALF32:
+                            if p == i and q == j:
+                                e = bp[s[i + 1], s[j]] + stack[s[i], s[j + 1], s[i + 1], s[j]]
+                            else:
+                                jB1 = hc[s[i], s[j + 1]] + tm[s[i], s[j + 1], s[i + 1], s[j]]
+                                jB2 = hc[s[q], s[p + 1]] + tm[s[q], s[p + 1], s[q + 1], s[p]]
+                                snuc = ZERO
+                                if l1 == 0 and l2 == 1:
+                                    snuc = b01[s[j]]
+                                elif l1 == 1 and l2 == 0:
+                                    snuc = b01[s[i + 1]]
+                                elif l1 == 1 and l2 == 1:
+                                    snuc = i11[s[i + 1], s[j]]
+                                e = cs[l1, l2] + bp[s[p + 1], s[q]] + jB1 + jB2 + snuc
+                            sum_i = lse32(sum_i, e + FC[p + 1, q - 1])
+                if FM2 > HALF32:
+                    jA = hc[s[i], s[j + 1]]
+                    if i < L:
+                        jA += dl[s[i], s[j + 1], s[i + 1]]
+                    if j > 0:
+                        jA += dr[s[i], s[j + 1], s[j]]
+                    sum_i = lse32(sum_i, FM2 + jA + mp + mb)
+                FC[i, j] = sum_i
+            if 0 < i and i + 2 <= j and j < L:
+                sum_i = NEGv
+                if canon[s[i + 1], s[j]] == 1 and forced[i + 1] == 0 and forced[j] == 0 and FC[i + 1, j - 1] > HALF32:
+                    jAji = hc[s[j], s[i + 1]]
+                    if j < L:
+                        jAji += dl[s[j], s[i + 1], s[j + 1]]
+                    if i > 0:
+                        jAji += dr[s[j], s[i + 1], s[i]]
+                    sum_i = lse32(sum_i, FC[i + 1, j - 1] + jAji + mp + bp[s[i + 1], s[j]])
+                if FM1[i + 1, j] > HALF32:
+                    sum_i = lse32(sum_i, FM1[i + 1, j] + mu)
+                FM1[i, j] = sum_i
+            if 0 < i and i + 2 <= j and j < L:
+                sum_i = NEGv
+                if FM2 > HALF32:
+                    sum_i = lse32(sum_i, FM2)
+                if FM[i, j - 1] > HALF32:
+                    sum_i = lse32(sum_i, FM[i, j - 1] + mu)
+                if FM1[i, j] > HALF32:
+                    sum_i = lse32(sum_i, FM1[i, j])
+                FM[i, j] = sum_i
+    F5[0] = ZERO
+    for j in range(1, L + 1):
+        sum_i = F5[j - 1] + eu
+        for k in range(0, j):
+            if canon[s[k + 1], s[j]] == 1 and forced[k + 1] == 0 and forced[j] == 0 and FC[k + 1, j - 1] > HALF32 and F5[k] > HALF32:
+                jA = hc[s[j], s[k + 1]]
+                if j < L:
+                    jA += dl[s[j], s[k + 1], s[j + 1]]
+                if k > 0:
+                    jA += dr[s[j], s[k + 1], s[k]]
+                sum_i = lse32(sum_i, F5[k] + FC[k + 1, j - 1] + ep + bp[s[k + 1], s[j]] + jA)
+        F5[j] = sum_i
+    Z = F5[L]
+
+    # ---------- outside ----------
+    FCo = np.full((L + 2, L + 2), NEGv)
+    FMo = np.full((L + 2, L + 2), NEGv)
+    FM1o = np.full((L + 2, L + 2), NEGv)
+    F5o = np.full(L + 2, NEGv)
+    F5o[L] = ZERO
+    for j in range(L, 0, -1):
+        F5o[j - 1] = lse32(F5o[j - 1], F5o[j] + eu)
+        for k in range(0, j):
+            if canon[s[k + 1], s[j]] == 1 and forced[k + 1] == 0 and forced[j] == 0:
+                jA = hc[s[j], s[k + 1]]
+                if j < L:
+                    jA += dl[s[j], s[k + 1], s[j + 1]]
+                if k > 0:
+                    jA += dr[s[j], s[k + 1], s[k]]
+                temp = F5o[j] + ep + bp[s[k + 1], s[j]] + jA
+                if FC[k + 1, j - 1] > HALF32:
+                    F5o[k] = lse32(F5o[k], temp + FC[k + 1, j - 1])
+                if F5[k] > HALF32:
+                    FCo[k + 1, j - 1] = lse32(FCo[k + 1, j - 1], temp + F5[k])
+    for i in range(0, L + 1):
+        for j in range(L, i - 1, -1):
+            FM2o = NEGv
+            if 0 < i and i + 2 <= j and j < L:
+                FM2o = lse32(FM2o, FMo[i, j])
+                FMo[i, j - 1] = lse32(FMo[i, j - 1], FMo[i, j] + mu)
+                FM1o[i, j] = lse32(FM1o[i, j], FMo[i, j])
+            if 0 < i and i + 2 <= j and j < L:
+                if canon[s[i + 1], s[j]] == 1 and forced[i + 1] == 0 and forced[j] == 0:
+                    jAji = hc[s[j], s[i + 1]]
+                    if j < L:
+                        jAji += dl[s[j], s[i + 1], s[j + 1]]
+                    if i > 0:
+                        jAji += dr[s[j], s[i + 1], s[i]]
+                    FCo[i + 1, j - 1] = lse32(FCo[i + 1, j - 1], FM1o[i, j] + jAji + mp + bp[s[i + 1], s[j]])
+                FM1o[i + 1, j] = lse32(FM1o[i + 1, j], FM1o[i, j] + mu)
+            # FC outer -> inner single-branch + FM2o (complementary #else branch)
+            if 0 < i and j < L and canon[s[i], s[j + 1]] == 1 and forced[i] == 0 and forced[j + 1] == 0:
+                fco = FCo[i, j]
+                if fco > HALF32:
+                    jB_ij = hc[s[i], s[j + 1]] + tm[s[i], s[j + 1], s[i + 1], s[j]]
+                    pmax = i + C_MAX_SINGLE
+                    if pmax > j:
+                        pmax = j
+                    for p in range(i, pmax + 1):
+                        l1 = p - i
+                        qmin = p + 2
+                        alt = p - i + j - C_MAX_SINGLE
+                        if alt > qmin:
+                            qmin = alt
+                        for q in range(j, qmin - 1, -1):
+                            l2 = j - q
+                            if canon[s[p + 1], s[q]] == 1 and forced[p + 1] == 0 and forced[q] == 0:
+                                if p == i and q == j:
+                                    e = bp[s[i + 1], s[j]] + stack[s[i], s[j + 1], s[i + 1], s[j]]
+                                else:
+                                    jB2 = hc[s[q], s[p + 1]] + tm[s[q], s[p + 1], s[q + 1], s[p]]
+                                    snuc = ZERO
+                                    if l1 == 0 and l2 == 1:
+                                        snuc = b01[s[j]]
+                                    elif l1 == 1 and l2 == 0:
+                                        snuc = b01[s[i + 1]]
+                                    elif l1 == 1 and l2 == 1:
+                                        snuc = i11[s[i + 1], s[j]]
+                                    e = cs[l1, l2] + bp[s[p + 1], s[q]] + jB_ij + jB2 + snuc
+                                FCo[p + 1, q - 1] = lse32(FCo[p + 1, q - 1], fco + e)
+                    jA = hc[s[i], s[j + 1]]
+                    if i < L:
+                        jA += dl[s[i], s[j + 1], s[i + 1]]
+                    if j > 0:
+                        jA += dr[s[i], s[j + 1], s[j]]
+                    FM2o = lse32(FM2o, fco + jA + mp + mb)
+            # distribute FM2o to FM1o[i,k] and FMo[k,j]
+            if FM2o > HALF32:
+                for k in range(i + 1, j):
+                    if FM[k, j] > HALF32:
+                        FM1o[i, k] = lse32(FM1o[i, k], FM2o + FM[k, j])
+                    if FM1[i, k] > HALF32:
+                        FMo[k, j] = lse32(FMo[k, j], FM2o + FM1[i, k])
+
+    # ---------- posterior ----------
+    POST = np.zeros((L + 2, L + 2), dtype=np.float32)
+    for i in range(L, -1, -1):
+        for j in range(i, L + 1):
+            if 0 < i and j < L and canon[s[i], s[j + 1]] == 1 and forced[i] == 0 and forced[j + 1] == 0:
+                outside = FCo[i, j] - Z
+                if outside > HALF32:
+                    jB_ij = hc[s[i], s[j + 1]] + tm[s[i], s[j + 1], s[i + 1], s[j]]
+                    pmax = i + C_MAX_SINGLE
+                    if pmax > j:
+                        pmax = j
+                    for p in range(i, pmax + 1):
+                        l1 = p - i
+                        qmin = p + 2
+                        alt = p - i + j - C_MAX_SINGLE
+                        if alt > qmin:
+                            qmin = alt
+                        for q in range(j, qmin - 1, -1):
+                            l2 = j - q
+                            if canon[s[p + 1], s[q]] == 1 and forced[p + 1] == 0 and forced[q] == 0 and FC[p + 1, q - 1] > HALF32:
+                                if p == i and q == j:
+                                    e = outside + bp[s[i + 1], s[j]] + stack[s[i], s[j + 1], s[i + 1], s[j]] + FC[p + 1, q - 1]
+                                else:
+                                    jB2 = hc[s[q], s[p + 1]] + tm[s[q], s[p + 1], s[q + 1], s[p]]
+                                    snuc = ZERO
+                                    if l1 == 0 and l2 == 1:
+                                        snuc = b01[s[j]]
+                                    elif l1 == 1 and l2 == 0:
+                                        snuc = b01[s[i + 1]]
+                                    elif l1 == 1 and l2 == 1:
+                                        snuc = i11[s[i + 1], s[j]]
+                                    e = outside + jB_ij + cs[l1, l2] + FC[p + 1, q - 1] + bp[s[p + 1], s[q]] + jB2 + snuc
+                                POST[p + 1, q] += fexp32(e)
+            if 0 < i and i + 2 <= j and j < L:
+                if canon[s[i + 1], s[j]] == 1 and forced[i + 1] == 0 and forced[j] == 0 and FC[i + 1, j - 1] > HALF32 and FM1o[i, j] > HALF32:
+                    jAji = hc[s[j], s[i + 1]]
+                    if j < L:
+                        jAji += dl[s[j], s[i + 1], s[j + 1]]
+                    if i > 0:
+                        jAji += dr[s[j], s[i + 1], s[i]]
+                    POST[i + 1, j] += fexp32(FM1o[i, j] + FC[i + 1, j - 1] + jAji + mp + bp[s[i + 1], s[j]] - Z)
+    for j in range(1, L + 1):
+        outside = F5o[j] - Z
+        if outside > HALF32:
+            for k in range(0, j):
+                if canon[s[k + 1], s[j]] == 1 and forced[k + 1] == 0 and forced[j] == 0 and FC[k + 1, j - 1] > HALF32 and F5[k] > HALF32:
+                    jA = hc[s[j], s[k + 1]]
+                    if j < L:
+                        jA += dl[s[j], s[k + 1], s[j + 1]]
+                    if k > 0:
+                        jA += dr[s[j], s[k + 1], s[k]]
+                    POST[k + 1, j] += fexp32(outside + F5[k] + FC[k + 1, j - 1] + ep + bp[s[k + 1], s[j]] + jA)
+    for i in range(1, L + 1):
+        for j in range(i + 1, L + 1):
+            v = POST[i, j]
+            if v < ZERO:
+                v = ZERO
+            elif v > F32(1.0):
+                v = F32(1.0)
+            POST[i, j] = v
+    return POST
+
+
+@njit(cache=True)
+def mea_decode(POST, L, forced, canon, s, gamma):
+    """Maximum-expected-accuracy (posterior) decoding. Faithful port of
+    CONTRAfold PredictPairingsPosterior (RealT=float). Returns 1-based partner
+    array. `gamma` is the sensitivity/specificity tradeoff."""
+    g = F32(gamma)
+    two_g = F32(2.0) * g
+    # unpaired posterior, scaled by 1/(2*gamma)
+    up = np.zeros(L + 1, dtype=np.float32)
+    for i in range(1, L + 1):
+        u = F32(1.0)
+        for j in range(1, i):
+            u -= POST[j, i]
+        for j in range(i + 1, L + 1):
+            u -= POST[i, j]
+        up[i] = u / two_g
+
+    score = np.full((L + 1, L + 1), F32(-1.0))
+    tb = np.full((L + 1, L + 1), -1, np.int64)
+    for i in range(L, -1, -1):
+        for j in range(i, L + 1):
+            if i == j:
+                if F32(0.0) > score[i, j]:
+                    score[i, j] = F32(0.0)
+                    tb[i, j] = 0
+            else:
+                # option 1: i+1 unpaired
+                v = up[i + 1] + score[i + 1, j]
+                if v > score[i, j]:
+                    score[i, j] = v
+                    tb[i, j] = 1
+                # option 2: j unpaired
+                v = up[j] + score[i, j - 1]
+                if v > score[i, j]:
+                    score[i, j] = v
+                    tb[i, j] = 2
+                if i + 2 <= j:
+                    # option 3: pair (i+1, j)
+                    if canon[s[i + 1], s[j]] == 1 and forced[i + 1] == 0 and forced[j] == 0:
+                        v = POST[i + 1, j] + score[i + 1, j - 1]
+                        if v > score[i, j]:
+                            score[i, j] = v
+                            tb[i, j] = 3
+                    # bifurcation
+                    for k in range(i + 1, j):
+                        v = score[i, k] + score[k, j]
+                        if v > score[i, j]:
+                            score[i, j] = v
+                            tb[i, j] = k + 4
+
+    pair = np.full(L + 2, -1, np.int64)
+    # iterative traceback (queue via stack arrays)
+    qi = np.empty(2 * L + 4, np.int64)
+    qj = np.empty(2 * L + 4, np.int64)
+    qi[0] = 0; qj[0] = L
+    head = 0; tail = 1
+    while head < tail:
+        i = qi[head]; j = qj[head]; head += 1
+        t = tb[i, j]
+        if t <= 0:
+            continue
+        if t == 1:
+            qi[tail] = i + 1; qj[tail] = j; tail += 1
+        elif t == 2:
+            qi[tail] = i; qj[tail] = j - 1; tail += 1
+        elif t == 3:
+            pair[i + 1] = j; pair[j] = i + 1
+            qi[tail] = i + 1; qj[tail] = j - 1; tail += 1
+        else:
+            k = t - 4
+            qi[tail] = i; qj[tail] = k; tail += 1
+            qi[tail] = k; qj[tail] = j; tail += 1
+    return pair
+
+
+def _params_f32(P):
+    """Cache float32 copies of the parameter tables (CONTRAfold uses RealT=float;
+    the MEA/posterior path matches the binary only in float32)."""
+    f = P.get("_f32")
+    if f is None:
+        f = {k: (np.float32(P[k]) if np.isscalar(P[k]) or P[k].ndim == 0
+                 else P[k].astype(np.float32))
+             for k in ("bp", "stack", "tm", "hc", "dl", "dr", "hp_cum", "cs",
+                       "i11", "b01")}
+        for k in ("mb", "mu", "mp", "eu", "ep"):
+            f[k] = np.float32(P[k])
+        P["_f32"] = f
+    return f
+
+
+def _posterior(seq, P, forced=None):
+    s, L = encode(seq)
+    fo = np.zeros(L + 2, dtype=np.int64)
+    if forced is not None:
+        for k in range(L):
+            fo[k + 1] = int(forced[k])
+    f = _params_f32(P)
+    POST = posterior(s, L, fo, f["bp"], f["stack"], f["tm"], f["hc"], f["dl"], f["dr"],
+                     f["hp_cum"], f["cs"], f["i11"], f["b01"],
+                     f["mb"], f["mu"], f["mp"], f["eu"], f["ep"], _CANON)
+    return s, L, fo, POST
+
+
+def bpp(seq, P, forced=None):
+    """Base-pair probability matrix (n x n upper triangle, 0-based) for `seq`."""
+    _s, L, _fo, POST = _posterior(seq, P, forced)
+    return POST[1:L + 1, 1:L + 1].astype(np.float64)
+
+
+def mea(seq, P, gamma=6.0, forced=None):
+    """Maximum-expected-accuracy structure (CONTRAfold default decoding) as
+    dot-bracket. `gamma` is the sensitivity/specificity tradeoff (default 6)."""
+    s, L, fo, POST = _posterior(seq, P, forced)
+    pair = mea_decode(POST, L, fo, _CANON, s, np.float32(gamma))
+    ch = ["."] * L
+    for t in range(1, L + 1):
+        if pair[t] > t:
+            ch[t - 1] = "("; ch[pair[t] - 1] = ")"
+    return "".join(ch)
+
+
 if __name__ == "__main__":
     P = load()
     for s in ["GGGGAAAACCCC", "GCGCGCAAAAGCGCGCAAAAGCGC"]:
-        print(f"{s}  logZ={logZ(s, P):.5f}")
+        print(f"{s}  logZ={logZ(s, P):.5f}  mea={mea(s, P)}")
