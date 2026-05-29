@@ -22,10 +22,14 @@ GPU. Folding millions of short windows (e.g. for DMS-MaPseq / SHAPE
 structure-probing pipelines) now runs the same model on the GPU, batching
 thousands of sequences at once.
 
-- **Accurate**: log-partition matches the CONTRAfold binary to ~1e-4 relative error
-  (the residual is CONTRAfold's own `Fast_LogPlusEquals` lookup-table approximation;
-  this implementation uses exact `log1p/exp`). Boltzmann sample base-pair frequencies
-  match CONTRAfold's posterior probabilities within sampling noise.
+- **Accurate**: the GPU engine reproduces CONTRAfold's **float-precision arithmetic**
+  — the same 8-segment polynomial `Fast_LogExpPlusOne` used by the `RealT=float`
+  binary — so log-partition matches the binary to ~5e-4 (≈1e-4 relative). The small
+  residual is float32 summation order on the GPU, not the algorithm; bit-identical
+  output isn't achievable on a parallel device (non-associative float adds + FMA).
+  The bundled CPU engine instead uses exact `log1p/exp` (double) as a higher-precision
+  reference, mirroring a `RealT=double` CONTRAfold build. Boltzmann sample base-pair
+  frequencies match CONTRAfold's posterior probabilities within sampling noise.
 - **Fast**: ~6,000–19,000 folds/s for 128-nt windows on an RTX 5090
   (≈2–6× a 32-core CPU running the CONTRAfold binary; ≈65–200× single-core).
 - **Constraints**: any position can be forced unpaired (hard constraint), e.g. to
@@ -136,9 +140,12 @@ and carries zero scores — exactly as the CONTRAfold binary handles them.
 ## Validation
 
 `tests/test_validation.py` checks:
-1. CPU `logZ` == GPU `logZ` (batched), and
-2. both == the original CONTRAfold binary (`--partition`) if available, and
+1. CPU (exact, double) vs GPU (CONTRAfold float arithmetic) `logZ` agree to ~1e-3, and
+2. GPU `logZ` matches the original CONTRAfold binary (`--partition`) to ~5e-4 if available, and
 3. GPU sample base-pair frequencies == CONTRAfold posteriors (`--posteriors`).
+
+Verified against CONTRAfold 2.02 (max |Δ logZ| 5e-4 over 20 random sequences;
+sample BPP within 0.006 of `--posteriors`).
 
 To validate against the original binary, build CONTRAfold and point to it:
 ```bash
