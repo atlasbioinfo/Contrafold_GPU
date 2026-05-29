@@ -16,9 +16,10 @@ from . import gpu
 
 load = cpu.load
 cpu_logZ = cpu.logZ
+mfe = cpu.mfe
 logZ_batch = gpu.logZ_batch
 sample_batch = gpu.sample_batch
 fold_tasks_gpu = gpu.fold_tasks_gpu
 
-__all__ = ["load", "cpu_logZ", "logZ_batch", "sample_batch", "fold_tasks_gpu", "cpu", "gpu"]
+__all__ = ["load", "cpu_logZ", "mfe", "logZ_batch", "sample_batch", "fold_tasks_gpu", "cpu", "gpu"]
 __version__ = "0.1.0"

@@ -2,13 +2,14 @@
 
 Fold a single sequence, a JSONL file, or a FASTA file on the GPU.
 
-    gpu-contrafold GGGGAAAACCCC                  # one sequence -> one structure (dot-bracket)
-    gpu-contrafold GGGGAAAACCCC --sample 10      # 10 Boltzmann structures
+    gpu-contrafold GGGGAAAACCCC                  # one sequence -> MFE structure (dot-bracket)
+    gpu-contrafold GGGGAAAACCCC --sample 10      # 10 Boltzmann samples
     gpu-contrafold GGGGAAAACCCC --logz           # partition function (logZ) instead
     gpu-contrafold seqs.jsonl -o out.jsonl       # batch (JSONL in/out)
 
-By default one Boltzmann-sampled structure is returned (deterministic for a given
---seed). Use --sample N for N structures, or --logz for the partition function.
+By default the maximum-probability (Viterbi/MAP) structure is returned — the same
+structure as `contrafold --viterbi`, deterministic. Use --sample N for N Boltzmann
+samples, or --logz for the partition function.
 
 The positional argument is a literal RNA sequence if it is not an existing file;
 otherwise it is read as JSONL (lines starting with `{`), FASTA (`>`), or a plain
@@ -152,7 +153,7 @@ def main(argv=None):
     parser.add_argument("input", help="RNA sequence, or path to a JSONL/FASTA/sequence-per-line file")
     parser.add_argument("-o", "--output", default=None, help="output JSONL (default: stdout)")
     parser.add_argument("--sample", type=int, default=0, metavar="N",
-                        help="draw N structures per sequence (default: 1 structure)")
+                        help="draw N Boltzmann samples per sequence (default: MFE structure)")
     parser.add_argument("--logz", action="store_true",
                         help="emit the partition function (logZ) instead of a structure")
     parser.add_argument("--chunk", type=int, default=4096, help="sequences per GPU launch")
@@ -164,17 +165,25 @@ def main(argv=None):
     if not records:
         raise SystemExit("no sequences in input")
 
-    # default: one sampled structure. --sample N: N structures. --logz (no --sample): logZ only.
-    logz_only = args.logz and not args.sample
-    n_samples = 0 if logz_only else (args.sample or 1)
+    # mode: default = MFE (Viterbi) structure; --sample N = Boltzmann samples; --logz = partition fn
+    mode = "logz" if (args.logz and not args.sample) else ("sample" if args.sample else "mfe")
 
     P = cpu.load()
-    logz, samples = fold(records, P, sample_n=n_samples, with_logz=args.logz,
-                         chunk=args.chunk, threads=args.threads, seed=args.seed)
+    logz = samples = structures = None
+    if mode == "mfe":
+        structures = [cpu.mfe(seq, P, build_mask(seq, con, where=f"id={rid!r}: "))
+                      for (rid, seq, con) in records]
+    elif mode == "sample":
+        logz, samples = fold(records, P, sample_n=args.sample, with_logz=args.logz,
+                             chunk=args.chunk, threads=args.threads, seed=args.seed)
+    else:  # logz
+        logz, _ = fold(records, P, sample_n=0, chunk=args.chunk, threads=args.threads)
 
     # single literal sequence with no -o: human-readable stdout
     if not from_file and not args.output:
-        if n_samples:
+        if mode == "mfe":
+            print(structures[0])
+        elif mode == "sample":
             if args.logz:
                 print(f"# logZ = {logz[0]:.6f}")
             for db in samples[0]:
@@ -187,15 +196,14 @@ def main(argv=None):
     try:
         for k, (rid, _seq, _con) in enumerate(records):
             rec = {"id": rid}
-            if not n_samples:
-                rec["logZ"] = logz[k]
-            else:
+            if mode == "mfe":
+                rec["structure"] = structures[k]
+            elif mode == "sample":
                 if args.logz:
                     rec["logZ"] = logz[k]
-                if n_samples == 1:
-                    rec["structure"] = samples[k][0]
-                else:
-                    rec["samples"] = samples[k]
+                rec["samples"] = samples[k]
+            else:
+                rec["logZ"] = logz[k]
             out.write(json.dumps(rec) + "\n")
     finally:
         if args.output:
