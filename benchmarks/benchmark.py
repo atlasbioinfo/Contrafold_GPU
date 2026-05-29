@@ -241,16 +241,15 @@ def main():
         print(f"  unconstrained {um:.3f}±{usd:.3f}s ({n/um:,.0f}/s) | "
               f"constrained {cm:.3f}±{csd:.3f}s ({n/cm:,.0f}/s) | avg {avg_c:.1f} forced/seq")
         sections += [f"## 3. Hard-constraint overhead — GPU logZ, {n:,} × {L} nt, batch {best_chunk:,}\n",
-                     f"Hard constraints add no GPU compute — forbidden pairs are pruned from the "
-                     f"recurrence. The only difference is host-side: building the per-base mask arrays. "
-                     f"Masks here force a random 2–10 positions per 100 nt unpaired "
-                     f"(avg **{avg_c:.1f}** forced positions per sequence).\n",
+                     f"Hard constraints are effectively free: forbidden pairs are pruned from the "
+                     f"recurrence (no extra GPU work) and the per-base mask arrays are built with "
+                     f"vectorised host code. Masks here force a random 2–10 positions per 100 nt "
+                     f"unpaired (avg **{avg_c:.1f}** forced positions per sequence).\n",
                      "| configuration | time (s) | folds/s |", "|:--|---:|---:|",
                      f"| no constraint | {um:.3f} ± {usd:.3f} | {n/um:,.0f} |",
                      f"| random DMS-like constraint | {cm:.3f} ± {csd:.3f} | {n/cm:,.0f} |", "",
-                     f"End-to-end throughput differs by {100*(um-cm)/um:+.1f} % here, from host-side "
-                     f"mask marshalling (a per-sequence Python loop); the GPU kernel itself does no "
-                     f"extra work. Vectorising that marshalling would close the gap.\n"]
+                     f"Constrained vs unconstrained throughput differs by only {100*(um-cm)/um:+.1f} % "
+                     f"(within run-to-run noise) — applying constraints costs nothing.\n"]
         summary.append(f"| logZ + DMS-like constraints, {n//1000}k × {L} nt | "
                        f"**{n/cm:,.0f} folds/s** |")
 

@@ -1,6 +1,6 @@
 # Contrafold_GPU
 
-CONTRAfold on the GPU — **~430× faster than a single CPU core** and **~37× a full
+CONTRAfold on the GPU — **~460× faster than a single CPU core** and **~38× a full
 32-thread CPU** at folding 10,000 × 200 nt RNAs on an RTX 5090 (vs this package's
 own CPU reference; see [Benchmark.md](Benchmark.md)), reproducing the original
 CONTRAfold's output.
@@ -116,9 +116,9 @@ python benchmarks/benchmark.py benchmarks/data/sim_10k_200nt.fa --repeat 3
 # add --skip-compare for a fast GPU-only run (no slow single-core CPU pass)
 ```
 
-Headline on an RTX 5090 (10k × 200 nt): logZ peaks at ~**9,800 folds/s** (~430× a
-single CPU core, ~37× the full 32-thread CPU); hard constraints add no GPU compute;
-Boltzmann sampling runs at ~6,000 structures/s (100 seqs × 100 samples). GPU memory
+Headline on an RTX 5090 (10k × 200 nt): logZ peaks at ~**9,800 folds/s** (~460× a
+single CPU core, ~38× the full 32-thread CPU); hard constraints are effectively free;
+Boltzmann sampling runs at ~5,600 structures/s (100 seqs × 100 samples). GPU memory
 scales as `~3 × (L+2)² × 4 B` per sequence in a batch (≈0.5 MB/seq at 200 nt,
 ≈3 MB/seq at 500 nt), so use a smaller batch for longer sequences or smaller GPUs.
 

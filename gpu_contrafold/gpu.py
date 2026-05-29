@@ -466,11 +466,10 @@ def logZ_batch(seqs, P, forced_list=None, threads=128):
     for bi, sq in enumerate(seqs):
         for k, c in enumerate(sq.upper()):
             S[bi, k + 1] = B.get(c, 4)
-        L[bi] = len(sq)
+        Lb = len(sq)
+        L[bi] = Lb
         if forced_list is not None and forced_list[bi] is not None:
-            f = forced_list[bi]
-            for k in range(len(sq)):
-                FO[bi, k + 1] = int(f[k])
+            FO[bi, 1:Lb + 1] = np.asarray(forced_list[bi], np.int32)[:Lb]
 
     canon = np.zeros((5, 5), np.int32)
     for (a, b2) in [(0, 3), (3, 0), (1, 2), (2, 1), (2, 3), (3, 2)]:
@@ -509,10 +508,10 @@ def sample_batch(seqs, P, n_samples, forced_list=None, threads=128, seed=0):
     for bi, sq in enumerate(seqs):
         for k, c in enumerate(sq.upper()):
             S[bi, k + 1] = BASE.get(c, 4)
-        L[bi] = len(sq)
+        Lb = len(sq)
+        L[bi] = Lb
         if forced_list is not None and forced_list[bi] is not None:
-            for k in range(len(sq)):
-                FO[bi, k + 1] = int(forced_list[bi][k])
+            FO[bi, 1:Lb + 1] = np.asarray(forced_list[bi], np.int32)[:Lb]
     canon = np.zeros((5, 5), np.int32)
     for (a, b2) in [(0, 3), (3, 0), (1, 2), (2, 1), (2, 3), (3, 2)]:
         canon[a, b2] = 1
