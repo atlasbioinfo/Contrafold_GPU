@@ -1,7 +1,9 @@
 # Contrafold_GPU
 
-CONTRAfold deployed on the GPU — up to ~64× faster than a single CPU core
-(≈2–6× a 32-core CPU), reproducing the original CONTRAfold's output.
+CONTRAfold on the GPU — **~370× faster than a single CPU core** and **~30× a full
+32-thread CPU** at folding 10,000 × 200 nt RNAs on an RTX 5090 (vs this package's
+own CPU reference; see [Benchmark.md](Benchmark.md)), reproducing the original
+CONTRAfold's output.
 
 GPU-accelerated **CONTRAfold** RNA secondary-structure model: partition function,
 posterior base-pair probabilities, and Boltzmann structure sampling — with optional
