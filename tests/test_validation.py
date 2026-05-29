@@ -84,6 +84,31 @@ def main():
     except Exception as e:
         print(f"[5] MFE structure check skipped: {type(e).__name__}")
 
+    # 6. MEA structure vs CONTRAfold default posterior decoding (optional)
+    try:
+        from gpu_contrafold import reference as ref
+        nmatch = sum(cpu.mea(s, P) == ref.mea_structure(s) for s in seqs[:20])
+        print(f"[6] MEA structure vs predict:    {nmatch}/20 exact  {'PASS' if nmatch == 20 else 'FAIL'}")
+        ok &= nmatch == 20
+        # also across a range of gamma values
+        gmatch = sum(cpu.mea(seqs[i], P, gamma=g) == ref.mea_structure(seqs[i], gamma=g)
+                     for i, g in enumerate([0.5, 1, 2, 4, 8], start=0))
+        print(f"[6b] MEA across gammas:          {gmatch}/5 exact   {'PASS' if gmatch == 5 else 'FAIL'}")
+        ok &= gmatch == 5
+    except Exception as e:
+        print(f"[6] MEA structure check skipped: {type(e).__name__}")
+
+    # 7. exact posterior (BPP) matrix vs CONTRAfold --posteriors (optional)
+    try:
+        from gpu_contrafold import reference as ref
+        md = 0.0
+        for s in seqs[:10]:
+            md = max(md, float(np.abs(cpu.bpp(s, P) - ref.bpp(s)).max()))
+        print(f"[7] exact bpp vs posteriors:     max diff = {md:.4f}  {'PASS' if md < 0.01 else 'FAIL'}")
+        ok &= md < 0.01
+    except Exception as e:
+        print(f"[7] exact bpp check skipped: {type(e).__name__}")
+
     print("\n" + ("ALL PASS" if ok else "SOME FAILED"))
     sys.exit(0 if ok else 1)
 

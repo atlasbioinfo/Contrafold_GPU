@@ -2,14 +2,18 @@
 
 Fold a single sequence, a JSONL file, or a FASTA file on the GPU.
 
-    gpu-contrafold GGGGAAAACCCC                  # one sequence -> MFE structure (dot-bracket)
+    gpu-contrafold GGGGAAAACCCC                  # one sequence -> MEA structure (dot-bracket)
+    gpu-contrafold GGGGAAAACCCC --gamma 4        # MEA with a custom tradeoff
+    gpu-contrafold GGGGAAAACCCC --viterbi        # max-probability (Viterbi/MAP) structure
     gpu-contrafold GGGGAAAACCCC --sample 10      # 10 Boltzmann samples
     gpu-contrafold GGGGAAAACCCC --logz           # partition function (logZ) instead
     gpu-contrafold seqs.jsonl -o out.jsonl       # batch (JSONL in/out)
 
-By default the maximum-probability (Viterbi/MAP) structure is returned — the same
-structure as `contrafold --viterbi`, deterministic. Use --sample N for N Boltzmann
-samples, or --logz for the partition function.
+By default the maximum-expected-accuracy (MEA) structure is returned via posterior
+decoding — exactly what `contrafold predict` returns by default (--gamma sets the
+sensitivity/specificity tradeoff, default 6). Use --viterbi for the maximum-
+probability (Viterbi/MAP) structure (same as `contrafold --viterbi`), --sample N
+for N Boltzmann samples, or --logz for the partition function.
 
 The positional argument is a literal RNA sequence if it is not an existing file;
 otherwise it is read as JSONL (lines starting with `{`), FASTA (`>`), or a plain
@@ -153,7 +157,11 @@ def main(argv=None):
     parser.add_argument("input", help="RNA sequence, or path to a JSONL/FASTA/sequence-per-line file")
     parser.add_argument("-o", "--output", default=None, help="output JSONL (default: stdout)")
     parser.add_argument("--sample", type=int, default=0, metavar="N",
-                        help="draw N Boltzmann samples per sequence (default: MFE structure)")
+                        help="draw N Boltzmann samples per sequence (default: MEA structure)")
+    parser.add_argument("--viterbi", "--mfe", action="store_true", dest="viterbi",
+                        help="max-probability (Viterbi/MAP) structure instead of MEA")
+    parser.add_argument("--gamma", type=float, default=6.0, metavar="G",
+                        help="MEA sensitivity/specificity tradeoff (default: 6); ignored with --viterbi")
     parser.add_argument("--logz", action="store_true",
                         help="emit the partition function (logZ) instead of a structure")
     parser.add_argument("--chunk", type=int, default=4096, help="sequences per GPU launch")
@@ -165,13 +173,23 @@ def main(argv=None):
     if not records:
         raise SystemExit("no sequences in input")
 
-    # mode: default = MFE (Viterbi) structure; --sample N = Boltzmann samples; --logz = partition fn
-    mode = "logz" if (args.logz and not args.sample) else ("sample" if args.sample else "mfe")
+    # mode: default = MEA (posterior decoding); --viterbi = MFE; --sample N = Boltzmann; --logz = partition fn
+    if args.sample:
+        mode = "sample"
+    elif args.logz:
+        mode = "logz"
+    elif args.viterbi:
+        mode = "mfe"
+    else:
+        mode = "mea"
 
     P = cpu.load()
     logz = samples = structures = None
     if mode == "mfe":
         structures = [cpu.mfe(seq, P, build_mask(seq, con, where=f"id={rid!r}: "))
+                      for (rid, seq, con) in records]
+    elif mode == "mea":
+        structures = [cpu.mea(seq, P, gamma=args.gamma, forced=build_mask(seq, con, where=f"id={rid!r}: "))
                       for (rid, seq, con) in records]
     elif mode == "sample":
         logz, samples = fold(records, P, sample_n=args.sample, with_logz=args.logz,
@@ -181,7 +199,7 @@ def main(argv=None):
 
     # single literal sequence with no -o: human-readable stdout
     if not from_file and not args.output:
-        if mode == "mfe":
+        if mode in ("mfe", "mea"):
             print(structures[0])
         elif mode == "sample":
             if args.logz:
@@ -196,7 +214,7 @@ def main(argv=None):
     try:
         for k, (rid, _seq, _con) in enumerate(records):
             rec = {"id": rid}
-            if mode == "mfe":
+            if mode in ("mfe", "mea"):
                 rec["structure"] = structures[k]
             elif mode == "sample":
                 if args.logz:
