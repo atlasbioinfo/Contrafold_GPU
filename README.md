@@ -48,13 +48,14 @@ works without a GPU. Install from source with `pip install .`.
 
 ## Command-line tool
 
-`pip install` exposes a `gpu-contrafold` command (also `python -m gpu_contrafold`):
+`pip install` exposes a `gpu-contrafold` command (also `gpu_contrafold`, or
+`python -m gpu_contrafold`) — pass the sequence or file directly:
 
 ```bash
-gpu-contrafold fold GGGGAAAACCCC                 # one sequence -> logZ
-gpu-contrafold fold GGGGAAAACCCC --sample 10     # 10 Boltzmann structures (dot-bracket)
-gpu-contrafold fold seqs.jsonl  -o out.jsonl     # batch: JSONL in -> JSONL out
-gpu-contrafold fold seqs.fasta  -o out.jsonl --sample 100
+gpu-contrafold GGGGAAAACCCC                 # one sequence -> logZ
+gpu-contrafold GGGGAAAACCCC --sample 10     # 10 Boltzmann structures (dot-bracket)
+gpu-contrafold seqs.jsonl  -o out.jsonl     # batch: JSONL in -> JSONL out
+gpu-contrafold seqs.fasta  -o out.jsonl --sample 100
 ```
 
 The argument is a literal RNA sequence if it is not an existing file; otherwise it is

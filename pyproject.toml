@@ -29,6 +29,7 @@ Issues = "https://github.com/atlasbioinfo/Contrafold_GPU/issues"
 
 [project.scripts]
 gpu-contrafold = "gpu_contrafold.cli:main"
+gpu_contrafold = "gpu_contrafold.cli:main"
 
 [tool.setuptools]
 packages = ["gpu_contrafold"]

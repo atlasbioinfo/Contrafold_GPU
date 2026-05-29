@@ -2,10 +2,10 @@
 
 Fold a single sequence, a JSONL file, or a FASTA file on the GPU.
 
-    gpu-contrafold fold GGGGAAAACCCC                  # one sequence -> logZ
-    gpu-contrafold fold GGGGAAAACCCC --sample 10      # 10 Boltzmann structures
-    gpu-contrafold fold seqs.jsonl -o out.jsonl       # batch (JSONL in/out)
-    gpu-contrafold fold seqs.fasta -o out.jsonl --sample 100
+    gpu-contrafold GGGGAAAACCCC                  # one sequence -> logZ
+    gpu-contrafold GGGGAAAACCCC --sample 10      # 10 Boltzmann structures
+    gpu-contrafold seqs.jsonl -o out.jsonl       # batch (JSONL in/out)
+    gpu-contrafold seqs.fasta -o out.jsonl --sample 100
 
 The positional argument is a literal RNA sequence if it is not an existing file;
 otherwise it is read as JSONL (lines starting with `{`), FASTA (`>`), or a plain
@@ -140,19 +140,19 @@ def fold(records, P, sample_n=0, with_logz=False, chunk=4096, threads=128, seed=
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "fold":          # back-compat: optional 'fold' subcommand
+        argv = argv[1:]
     parser = argparse.ArgumentParser(prog="gpu-contrafold", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = parser.add_subparsers(dest="cmd", required=True)
-    pf = sub.add_parser("fold", help="fold a sequence, JSONL file, or FASTA file",
-                        formatter_class=argparse.RawDescriptionHelpFormatter, description=__doc__)
-    pf.add_argument("input", help="RNA sequence, or path to a JSONL/FASTA/sequence-per-line file")
-    pf.add_argument("-o", "--output", default=None, help="output JSONL (default: stdout)")
-    pf.add_argument("--sample", type=int, default=0, metavar="N",
-                    help="draw N Boltzmann samples per sequence (default: 0 = logZ only)")
-    pf.add_argument("--logz", action="store_true", help="in --sample mode, also emit logZ")
-    pf.add_argument("--chunk", type=int, default=4096, help="sequences per GPU launch")
-    pf.add_argument("--threads", type=int, default=128, help="GPU threads per block")
-    pf.add_argument("--seed", type=int, default=0, help="RNG seed for sampling")
+    parser.add_argument("input", help="RNA sequence, or path to a JSONL/FASTA/sequence-per-line file")
+    parser.add_argument("-o", "--output", default=None, help="output JSONL (default: stdout)")
+    parser.add_argument("--sample", type=int, default=0, metavar="N",
+                        help="draw N Boltzmann samples per sequence (default: 0 = logZ only)")
+    parser.add_argument("--logz", action="store_true", help="in --sample mode, also emit logZ")
+    parser.add_argument("--chunk", type=int, default=4096, help="sequences per GPU launch")
+    parser.add_argument("--threads", type=int, default=128, help="GPU threads per block")
+    parser.add_argument("--seed", type=int, default=0, help="RNG seed for sampling")
     args = parser.parse_args(argv)
 
     records, from_file = load_records(args.input)
