@@ -5,3 +5,6 @@ build/
 dist/
 .ipynb_checkpoints/
 benchmarks/data/
+.env
+.env.*
+*.pypirc
