@@ -48,8 +48,8 @@ works without a GPU. Install from source with `pip install .`.
 
 ## Command-line tool
 
-`pip install` exposes a `gpu-contrafold` command (also `gpu_contrafold`, or
-`python -m gpu_contrafold`) — pass the sequence or file directly:
+`pip install` exposes a `gpu-contrafold` command (or `python -m gpu_contrafold`)
+— pass the sequence or file directly:
 
 ```bash
 gpu-contrafold GGGGAAAACCCC                 # one sequence -> MEA structure (dot-bracket)
@@ -182,18 +182,31 @@ export GPU_CONTRAFOLD_BIN=/path/to/contrafold
 python tests/test_validation.py
 ```
 
-## Attribution & License
+## Acknowledgments
 
-This is a GPU rewrite of **CONTRAfold** (http://contra.stanford.edu/contrafold/)
-and ships its trained parameter file:
+All of the science here — the CRF scoring model, the inside/outside recurrences,
+the posterior decoding, and the trained parameters — is the work of the original
+**CONTRAfold** authors. This project is purely an engineering effort (a GPU port +
+faithful re-implementation); full credit for the method belongs to them:
+
+- **Chuong B. Do**, **Daniel A. Woods**, and **Serafim Batzoglou**
+  ([Batzoglou Lab](https://web.stanford.edu/group/batzoglou/), Stanford University)
+- Original software & parameters: **CONTRAfold** — http://contra.stanford.edu/contrafold/
+- Source code referenced during this re-implementation:
+  [csfoo/contrafold-se](https://github.com/csfoo/contrafold-se)
+  (a maintained mirror of the original CONTRAfold/CONTRAfold-SE source)
 
 > Do CB, Woods DA, Batzoglou S. *CONTRAfold: RNA secondary structure prediction
-> without physics-based models.* Bioinformatics. 2006;22(14):e90-8.
-> Project page: http://contra.stanford.edu/contrafold/
+> without physics-based models.* Bioinformatics. 2006;22(14):e90–e98.
+> doi:[10.1093/bioinformatics/btl246](https://doi.org/10.1093/bioinformatics/btl246)
+
+Please **cite the CONTRAfold paper** if you use this package in published work.
+
+## License
 
 This GPU reimplementation is released under the **MIT license** (see `LICENSE`).
 It incorporates the CONTRAfold model and bundles its trained parameter file, which
 derive from the **BSD-licensed** CONTRAfold source (see `NOTICE.md`); those components
-remain under their original terms. Please retain that attribution and cite the paper.
+remain under their original terms. Please retain that attribution.
 
 [Numba CUDA]: https://numba.readthedocs.io/en/stable/cuda/index.html
