@@ -210,6 +210,18 @@ export GPU_CONTRAFOLD_BIN=/path/to/contrafold
 python tests/test_validation.py
 ```
 
+### Tests
+
+```bash
+python tests/test_tps.py          # thread-per-sequence == block-per-sequence (GPU only)
+python tests/test_validation.py   # CPU vs GPU, constraints; add GPU_CONTRAFOLD_BIN
+                                  # to also diff against the original binary
+```
+
+`test_tps.py` asserts bitwise equality of the posterior, not a tolerance: the
+`_tps` kernels run the same serial recurrence per thread with no atomics, so any
+nonzero difference would mean a race.
+
 ## Acknowledgments
 
 All of the science here — the CRF scoring model, the inside/outside recurrences,
