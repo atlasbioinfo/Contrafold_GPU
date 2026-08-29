@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpu-contrafold"
-version = "0.1.0"
+version = "0.2.0"
 description = "GPU-accelerated CONTRAfold partition function + Boltzmann sampling with hard constraints"
 readme = "README.md"
 license = "MIT"

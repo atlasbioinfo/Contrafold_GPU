@@ -120,7 +120,35 @@ structs = sample_batch(["GGGGAAAACCCC"], P, n_samples=10, forced_list=[mask])
 # Bulk pipeline primitive: fold many (seq, mask) tasks, 1 sample each, chunked
 from gpu_contrafold import fold_tasks_gpu
 dbs = fold_tasks_gpu(seqs, masks, P)        # list of dot-bracket strings
+
+# GPU posterior + MEA decode
+from gpu_contrafold import mea_gpu, bpp_gpu
+dbs = mea_gpu(["GGGGAAAACCCC"], P, gamma=6.0)
+probs = bpp_gpu(["GGGGAAAACCCC"], P)
 ```
+
+### Many reads of one transcript
+
+Structure-probing data is the opposite shape from the usual benchmark: not one
+long sequence, but thousands of short ones that differ only in their constraint
+mask. `mea_gpu` gives each sequence a whole CUDA block, which leaves 127 of 128
+lanes idle. `mea_gpu_tps` folds **one sequence per thread** instead, so every
+lane works on its own read:
+
+```python
+from gpu_contrafold import mea_gpu_tps
+masks = [...]                                # one int8 array per read
+dbs = mea_gpu_tps([seq] * len(masks), P, gamma=6.0, forced_list=masks)
+```
+
+The recurrence each thread runs is the same serial one, with no atomics and no
+cross-thread reduction, so the posterior is bit-identical to `mea_gpu` and the
+decoded structures are guaranteed to match. Matrices use a sequence-last layout
+so the 32 lanes of a warp touch consecutive addresses; sort the batch by length
+first to keep lanes in a warp from diverging.
+
+Memory is `~7 × (L+2)² × 4 B` per sequence in flight, so pick the batch size
+from free GPU memory rather than a fixed constant.
 
 CPU reference (matches the binary, no GPU needed):
 

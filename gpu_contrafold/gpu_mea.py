@@ -352,6 +352,288 @@ def post_kernel(seqs, lengths, forced, canon,
 
 
 # ----------------------------------------------------------------------------
+# Thread-per-sequence posterior kernel (the "davinci" path).
+#
+# Same float32 arithmetic and the SAME per-cell accumulation order as
+# ``post_kernel`` above (and hence as ``cpu.posterior``), but each CUDA *thread*
+# folds one whole sequence serially instead of one *block* per sequence. With
+# the single-thread-per-block kernel only 1/128 of every block's lanes were
+# active; here every lane is busy on its own read, so a batch of many short
+# reads saturates the GPU. Because the recurrence each thread runs is byte-for-
+# byte the serial one, POST is bit-identical to ``post_kernel`` (no atomics, no
+# cross-thread reduction, no scatter races) -> the decoded structures are
+# guaranteed identical to the previous GPU path.
+#
+# Matrices use a SEQUENCE-LAST layout (nn, nn, Bn) / (nn, Bn) so that the 32
+# lanes of a warp (consecutive sequence indices) touch consecutive addresses at
+# every matrix access -> coalesced global memory. Sequences are length-sorted by
+# the caller, so lanes in a warp fold near-equal lengths and barely diverge.
+# ----------------------------------------------------------------------------
+@cuda.jit(cache=True)
+def init_kernel_tps(FC, FM, FM1, F5, FCo, FMo, FM1o, F5o, POST):
+    """Flat, fully-parallel, coalesced initialization of the sequence-last
+    matrices for ``post_kernel_tps``. Done in its own launch so every lane shares
+    the init work (vs. each fold-thread zeroing its own nn^2 matrices serially)."""
+    nn = FC.shape[0]
+    Bn = FC.shape[2]
+    g = cuda.grid(1)
+    stride = cuda.gridsize(1)
+    tot = nn * nn * Bn
+    idx = g
+    while idx < tot:
+        b = idx % Bn
+        r = idx // Bn
+        j = r % nn
+        i = r // nn
+        FC[i, j, b] = NEG
+        FM[i, j, b] = NEG
+        FM1[i, j, b] = NEG
+        FCo[i, j, b] = NEG
+        FMo[i, j, b] = NEG
+        FM1o[i, j, b] = NEG
+        POST[i, j, b] = float32(0.0)
+        idx += stride
+    idx = g
+    tot2 = nn * Bn
+    while idx < tot2:
+        b = idx % Bn
+        j = idx // Bn
+        F5[j, b] = NEG
+        F5o[j, b] = NEG
+        idx += stride
+
+
+@cuda.jit(cache=True)
+def post_kernel_tps(seqs, lengths, forced, canon,
+                    bp, stack, tm, hc, dl, dr, hp_cum, cs, i11, b01,
+                    mb, mu, mp, eu, ep,
+                    FC, FM, FM1, F5,
+                    FCo, FMo, FM1o, F5o, POST):
+    b = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
+    if b >= lengths.shape[0]:
+        return
+    L = lengths[b]
+    s = seqs[b]
+    fo = forced[b]
+
+    ZERO = float32(0.0)
+
+    # ====================== INSIDE ======================
+    for i in range(L, -1, -1):
+        for j in range(i, L + 1):
+            FM2 = NEG
+            for k in range(i + 1, j):
+                if FM1[i, k, b] > HALF and FM[k, j, b] > HALF:
+                    FM2 = lse(FM2, FM1[i, k, b] + FM[k, j, b])
+            if 0 < i and j < L and canon[s[i], s[j + 1]] == 1 and fo[i] == 0 and fo[j + 1] == 0:
+                sum_i = NEG
+                jB = hc[s[i], s[j + 1]] + tm[s[i], s[j + 1], s[i + 1], s[j]]
+                d = j - i
+                sum_i = lse(sum_i, jB + hp_cum[d if d <= DH else DH])
+                pmax = i + CMAX
+                if pmax > j:
+                    pmax = j
+                for p in range(i, pmax + 1):
+                    l1 = p - i
+                    qmin = p + 2
+                    alt = p - i + j - CMAX
+                    if alt > qmin:
+                        qmin = alt
+                    for q in range(j, qmin - 1, -1):
+                        l2 = j - q
+                        if canon[s[p + 1], s[q]] == 1 and fo[p + 1] == 0 and fo[q] == 0 and FC[p + 1, q - 1, b] > HALF:
+                            if p == i and q == j:
+                                e = bp[s[i + 1], s[j]] + stack[s[i], s[j + 1], s[i + 1], s[j]]
+                            else:
+                                jB2 = hc[s[q], s[p + 1]] + tm[s[q], s[p + 1], s[q + 1], s[p]]
+                                snuc = ZERO
+                                if l1 == 0 and l2 == 1:
+                                    snuc = b01[s[j]]
+                                elif l1 == 1 and l2 == 0:
+                                    snuc = b01[s[i + 1]]
+                                elif l1 == 1 and l2 == 1:
+                                    snuc = i11[s[i + 1], s[j]]
+                                e = cs[l1, l2] + bp[s[p + 1], s[q]] + jB + jB2 + snuc
+                            sum_i = lse(sum_i, e + FC[p + 1, q - 1, b])
+                if FM2 > HALF:
+                    jA = hc[s[i], s[j + 1]]
+                    if i < L:
+                        jA += dl[s[i], s[j + 1], s[i + 1]]
+                    if j > 0:
+                        jA += dr[s[i], s[j + 1], s[j]]
+                    sum_i = lse(sum_i, FM2 + jA + mp + mb)
+                FC[i, j, b] = sum_i
+            if 0 < i and i + 2 <= j and j < L:
+                sum_i = NEG
+                if canon[s[i + 1], s[j]] == 1 and fo[i + 1] == 0 and fo[j] == 0 and FC[i + 1, j - 1, b] > HALF:
+                    jAji = hc[s[j], s[i + 1]]
+                    if j < L:
+                        jAji += dl[s[j], s[i + 1], s[j + 1]]
+                    if i > 0:
+                        jAji += dr[s[j], s[i + 1], s[i]]
+                    sum_i = lse(sum_i, FC[i + 1, j - 1, b] + jAji + mp + bp[s[i + 1], s[j]])
+                if FM1[i + 1, j, b] > HALF:
+                    sum_i = lse(sum_i, FM1[i + 1, j, b] + mu)
+                FM1[i, j, b] = sum_i
+            if 0 < i and i + 2 <= j and j < L:
+                sum_i = NEG
+                if FM2 > HALF:
+                    sum_i = lse(sum_i, FM2)
+                if FM[i, j - 1, b] > HALF:
+                    sum_i = lse(sum_i, FM[i, j - 1, b] + mu)
+                if FM1[i, j, b] > HALF:
+                    sum_i = lse(sum_i, FM1[i, j, b])
+                FM[i, j, b] = sum_i
+    F5[0, b] = ZERO
+    for j in range(1, L + 1):
+        sum_i = F5[j - 1, b] + eu
+        for k in range(0, j):
+            if canon[s[k + 1], s[j]] == 1 and fo[k + 1] == 0 and fo[j] == 0 and FC[k + 1, j - 1, b] > HALF and F5[k, b] > HALF:
+                jA = hc[s[j], s[k + 1]]
+                if j < L:
+                    jA += dl[s[j], s[k + 1], s[j + 1]]
+                if k > 0:
+                    jA += dr[s[j], s[k + 1], s[k]]
+                sum_i = lse(sum_i, F5[k, b] + FC[k + 1, j - 1, b] + ep + bp[s[k + 1], s[j]] + jA)
+        F5[j, b] = sum_i
+    Z = F5[L, b]
+
+    # ====================== OUTSIDE ======================
+    F5o[L, b] = ZERO
+    for j in range(L, 0, -1):
+        F5o[j - 1, b] = lse(F5o[j - 1, b], F5o[j, b] + eu)
+        for k in range(0, j):
+            if canon[s[k + 1], s[j]] == 1 and fo[k + 1] == 0 and fo[j] == 0:
+                jA = hc[s[j], s[k + 1]]
+                if j < L:
+                    jA += dl[s[j], s[k + 1], s[j + 1]]
+                if k > 0:
+                    jA += dr[s[j], s[k + 1], s[k]]
+                temp = F5o[j, b] + ep + bp[s[k + 1], s[j]] + jA
+                if FC[k + 1, j - 1, b] > HALF:
+                    F5o[k, b] = lse(F5o[k, b], temp + FC[k + 1, j - 1, b])
+                if F5[k, b] > HALF:
+                    FCo[k + 1, j - 1, b] = lse(FCo[k + 1, j - 1, b], temp + F5[k, b])
+    for i in range(0, L + 1):
+        for j in range(L, i - 1, -1):
+            FM2o = NEG
+            if 0 < i and i + 2 <= j and j < L:
+                FM2o = lse(FM2o, FMo[i, j, b])
+                FMo[i, j - 1, b] = lse(FMo[i, j - 1, b], FMo[i, j, b] + mu)
+                FM1o[i, j, b] = lse(FM1o[i, j, b], FMo[i, j, b])
+            if 0 < i and i + 2 <= j and j < L:
+                if canon[s[i + 1], s[j]] == 1 and fo[i + 1] == 0 and fo[j] == 0:
+                    jAji = hc[s[j], s[i + 1]]
+                    if j < L:
+                        jAji += dl[s[j], s[i + 1], s[j + 1]]
+                    if i > 0:
+                        jAji += dr[s[j], s[i + 1], s[i]]
+                    FCo[i + 1, j - 1, b] = lse(FCo[i + 1, j - 1, b], FM1o[i, j, b] + jAji + mp + bp[s[i + 1], s[j]])
+                FM1o[i + 1, j, b] = lse(FM1o[i + 1, j, b], FM1o[i, j, b] + mu)
+            if 0 < i and j < L and canon[s[i], s[j + 1]] == 1 and fo[i] == 0 and fo[j + 1] == 0:
+                fco = FCo[i, j, b]
+                if fco > HALF:
+                    jB_ij = hc[s[i], s[j + 1]] + tm[s[i], s[j + 1], s[i + 1], s[j]]
+                    pmax = i + CMAX
+                    if pmax > j:
+                        pmax = j
+                    for p in range(i, pmax + 1):
+                        l1 = p - i
+                        qmin = p + 2
+                        alt = p - i + j - CMAX
+                        if alt > qmin:
+                            qmin = alt
+                        for q in range(j, qmin - 1, -1):
+                            l2 = j - q
+                            if canon[s[p + 1], s[q]] == 1 and fo[p + 1] == 0 and fo[q] == 0:
+                                if p == i and q == j:
+                                    e = bp[s[i + 1], s[j]] + stack[s[i], s[j + 1], s[i + 1], s[j]]
+                                else:
+                                    jB2 = hc[s[q], s[p + 1]] + tm[s[q], s[p + 1], s[q + 1], s[p]]
+                                    snuc = ZERO
+                                    if l1 == 0 and l2 == 1:
+                                        snuc = b01[s[j]]
+                                    elif l1 == 1 and l2 == 0:
+                                        snuc = b01[s[i + 1]]
+                                    elif l1 == 1 and l2 == 1:
+                                        snuc = i11[s[i + 1], s[j]]
+                                    e = cs[l1, l2] + bp[s[p + 1], s[q]] + jB_ij + jB2 + snuc
+                                FCo[p + 1, q - 1, b] = lse(FCo[p + 1, q - 1, b], fco + e)
+                    jA = hc[s[i], s[j + 1]]
+                    if i < L:
+                        jA += dl[s[i], s[j + 1], s[i + 1]]
+                    if j > 0:
+                        jA += dr[s[i], s[j + 1], s[j]]
+                    FM2o = lse(FM2o, fco + jA + mp + mb)
+            if FM2o > HALF:
+                for k in range(i + 1, j):
+                    if FM[k, j, b] > HALF:
+                        FM1o[i, k, b] = lse(FM1o[i, k, b], FM2o + FM[k, j, b])
+                    if FM1[i, k, b] > HALF:
+                        FMo[k, j, b] = lse(FMo[k, j, b], FM2o + FM1[i, k, b])
+
+    # ====================== POSTERIOR ======================
+    for i in range(L, -1, -1):
+        for j in range(i, L + 1):
+            if 0 < i and j < L and canon[s[i], s[j + 1]] == 1 and fo[i] == 0 and fo[j + 1] == 0:
+                outside = FCo[i, j, b] - Z
+                if outside > HALF:
+                    jB_ij = hc[s[i], s[j + 1]] + tm[s[i], s[j + 1], s[i + 1], s[j]]
+                    pmax = i + CMAX
+                    if pmax > j:
+                        pmax = j
+                    for p in range(i, pmax + 1):
+                        l1 = p - i
+                        qmin = p + 2
+                        alt = p - i + j - CMAX
+                        if alt > qmin:
+                            qmin = alt
+                        for q in range(j, qmin - 1, -1):
+                            l2 = j - q
+                            if canon[s[p + 1], s[q]] == 1 and fo[p + 1] == 0 and fo[q] == 0 and FC[p + 1, q - 1, b] > HALF:
+                                if p == i and q == j:
+                                    e = outside + bp[s[i + 1], s[j]] + stack[s[i], s[j + 1], s[i + 1], s[j]] + FC[p + 1, q - 1, b]
+                                else:
+                                    jB2 = hc[s[q], s[p + 1]] + tm[s[q], s[p + 1], s[q + 1], s[p]]
+                                    snuc = ZERO
+                                    if l1 == 0 and l2 == 1:
+                                        snuc = b01[s[j]]
+                                    elif l1 == 1 and l2 == 0:
+                                        snuc = b01[s[i + 1]]
+                                    elif l1 == 1 and l2 == 1:
+                                        snuc = i11[s[i + 1], s[j]]
+                                    e = outside + jB_ij + cs[l1, l2] + FC[p + 1, q - 1, b] + bp[s[p + 1], s[q]] + jB2 + snuc
+                                POST[p + 1, q, b] += fexp(e)
+            if 0 < i and i + 2 <= j and j < L:
+                if canon[s[i + 1], s[j]] == 1 and fo[i + 1] == 0 and fo[j] == 0 and FC[i + 1, j - 1, b] > HALF and FM1o[i, j, b] > HALF:
+                    jAji = hc[s[j], s[i + 1]]
+                    if j < L:
+                        jAji += dl[s[j], s[i + 1], s[j + 1]]
+                    if i > 0:
+                        jAji += dr[s[j], s[i + 1], s[i]]
+                    POST[i + 1, j, b] += fexp(FM1o[i, j, b] + FC[i + 1, j - 1, b] + jAji + mp + bp[s[i + 1], s[j]] - Z)
+    for j in range(1, L + 1):
+        outside = F5o[j, b] - Z
+        if outside > HALF:
+            for k in range(0, j):
+                if canon[s[k + 1], s[j]] == 1 and fo[k + 1] == 0 and fo[j] == 0 and FC[k + 1, j - 1, b] > HALF and F5[k, b] > HALF:
+                    jA = hc[s[j], s[k + 1]]
+                    if j < L:
+                        jA += dl[s[j], s[k + 1], s[j + 1]]
+                    if k > 0:
+                        jA += dr[s[j], s[k + 1], s[k]]
+                    POST[k + 1, j, b] += fexp(outside + F5[k, b] + FC[k + 1, j - 1, b] + ep + bp[s[k + 1], s[j]] + jA)
+    for i in range(1, L + 1):
+        for j in range(i + 1, L + 1):
+            v = POST[i, j, b]
+            if v < ZERO:
+                v = ZERO
+            elif v > float32(1.0):
+                v = float32(1.0)
+            POST[i, j, b] = v
+
+
+# ----------------------------------------------------------------------------
 # Host wrappers
 # ----------------------------------------------------------------------------
 _BASE = {'A': 0, 'C': 1, 'G': 2, 'U': 3, 'T': 3}
@@ -431,6 +713,82 @@ def mea_gpu(seqs, P, gamma=6.0, forced_list=None, threads=128):
         Lb = int(L[bi])
         nn = Lb + 2
         POST = np.ascontiguousarray(POSTh[bi, :nn, :nn])
+        s = np.ascontiguousarray(S[bi, :nn].astype(np.int64))
+        fo = np.ascontiguousarray(FO[bi, :nn].astype(np.int64))
+        pair = cpu.mea_decode(POST, Lb, fo, cpu._CANON, s, g)
+        ch = ["."] * Lb
+        for t in range(1, Lb + 1):
+            if pair[t] > t:
+                ch[t - 1] = "("; ch[pair[t] - 1] = ")"
+        res.append("".join(ch))
+    return res
+
+
+# ----------------------------------------------------------------------------
+# Thread-per-sequence host wrappers (the "davinci" path for many reads).
+# Bit-identical POST to ``_run_post_kernel`` above; just a different lane mapping
+# and a sequence-last (coalesced) matrix layout.
+# ----------------------------------------------------------------------------
+def _run_post_kernel_tps(seqs, P, forced_list, threads):
+    S, L, FO, canon, f, n_max, Bn = _prepare(seqs, P, forced_list)
+    nn = n_max + 2
+
+    d = lambda a: cuda.to_device(np.ascontiguousarray(a, dtype=np.float32))
+    di = lambda a: cuda.to_device(np.ascontiguousarray(a, dtype=np.int32))
+
+    # sequence-last layout (nn, nn, Bn): a warp of consecutive sequence indices
+    # accesses consecutive addresses -> coalesced global memory.
+    FC = cuda.device_array((nn, nn, Bn), np.float32)
+    FM = cuda.device_array((nn, nn, Bn), np.float32)
+    FM1 = cuda.device_array((nn, nn, Bn), np.float32)
+    F5 = cuda.device_array((nn, Bn), np.float32)
+    FCo = cuda.device_array((nn, nn, Bn), np.float32)
+    FMo = cuda.device_array((nn, nn, Bn), np.float32)
+    FM1o = cuda.device_array((nn, nn, Bn), np.float32)
+    F5o = cuda.device_array((nn, Bn), np.float32)
+    POST = cuda.device_array((nn, nn, Bn), np.float32)
+
+    init_kernel_tps[256, 256](FC, FM, FM1, F5, FCo, FMo, FM1o, F5o, POST)
+    blocks = (Bn + threads - 1) // threads
+    post_kernel_tps[blocks, threads](
+        di(S), di(L), di(FO), di(canon),
+        d(f["bp"]), d(f["stack"]), d(f["tm"]), d(f["hc"]), d(f["dl"]), d(f["dr"]),
+        d(f["hp_cum"]), d(f["cs"]), d(f["i11"]), d(f["b01"]),
+        np.float32(f["mb"]), np.float32(f["mu"]), np.float32(f["mp"]),
+        np.float32(f["eu"]), np.float32(f["ep"]),
+        FC, FM, FM1, F5, FCo, FMo, FM1o, F5o, POST)
+    cuda.synchronize()
+    POSTh = POST.copy_to_host()          # (nn, nn, Bn)
+    return POSTh, S, L, FO
+
+
+def bpp_gpu_tps(seqs, P, forced_list=None, threads=128):
+    """Thread-per-sequence base-pair probability matrices (davinci path).
+
+    Bit-identical to ``bpp_gpu`` but folds one sequence per GPU thread, so a
+    batch of many reads saturates the device. Returns the same list of
+    (Lb x Lb) float64 matrices as ``bpp_gpu``."""
+    POSTh, S, L, FO = _run_post_kernel_tps(seqs, P, forced_list, threads)
+    out = []
+    for bi in range(len(seqs)):
+        Lb = int(L[bi])
+        out.append(np.ascontiguousarray(POSTh[1:Lb + 1, 1:Lb + 1, bi]).astype(np.float64))
+    return out
+
+
+def mea_gpu_tps(seqs, P, gamma=6.0, forced_list=None, threads=128):
+    """Thread-per-sequence GPU MEA structures (davinci path for many reads).
+
+    Folds one sequence per GPU thread; POST is bit-identical to ``mea_gpu`` so
+    the decoded structures are guaranteed identical. The O(L^3) MEA decode runs
+    on the host via ``cpu.mea_decode`` (njit), same as ``mea_gpu``."""
+    POSTh, S, L, FO = _run_post_kernel_tps(seqs, P, forced_list, threads)
+    g = np.float32(gamma)
+    res = []
+    for bi in range(len(seqs)):
+        Lb = int(L[bi])
+        nn = Lb + 2
+        POST = np.ascontiguousarray(POSTh[:nn, :nn, bi])
         s = np.ascontiguousarray(S[bi, :nn].astype(np.int64))
         fo = np.ascontiguousarray(FO[bi, :nn].astype(np.int64))
         pair = cpu.mea_decode(POST, Lb, fo, cpu._CANON, s, g)
